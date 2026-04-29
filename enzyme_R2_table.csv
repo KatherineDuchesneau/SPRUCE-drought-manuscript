@@ -1,0 +1,6 @@
+Enzyme,Model,n,Adj_R2,Predictors
+Phenol oxidase,Gamma GLM,18,0.439,Temp_avg_top + WT_drawdown_cm + CO2_Treatment
+β-glucosidase,lm (log),15,0.584,Temp_avg_top + WT_drawdown_cm + CO2_Treatment
+Cellobiohydrolase,lm (log),15,0.307,Temp_avg_top + WT_drawdown_cm + Temp_avg_top:WT_drawdown_cm
+β-N-acetylglucosaminidase,lm (log),15,0.361,WT_drawdown_cm
+Acid phosphatase,lm (log),15,0.707,WT_drawdown_cm

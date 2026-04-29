@@ -1,0 +1,13 @@
+response,term,Estimate,Std. Error,t value,Pr(>|t|),log_transformed,sig
+β-glucosidase (log),(Intercept),-0.8446,1.2338,-0.6846,0.5078,TRUE,
+β-glucosidase (log),Temp_avg_top,0.0865,0.0607,1.4247,0.182,TRUE,
+β-glucosidase (log),WT_drawdown_cm,0.0573,0.0175,3.2707,0.0075,TRUE,**
+β-glucosidase (log),CO2_TreatmentElevated,-0.6017,0.4201,-1.4324,0.1798,TRUE,
+Cellobiohydrolase (log),(Intercept),-5.6875,2.8545,-1.9924,0.0717,TRUE,.
+Cellobiohydrolase (log),Temp_avg_top,0.2111,0.1344,1.5702,0.1447,TRUE,
+Cellobiohydrolase (log),WT_drawdown_cm,0.6418,0.2951,2.175,0.0523,TRUE,.
+Cellobiohydrolase (log),Temp_avg_top:WT_drawdown_cm,-0.0242,0.0122,-1.9871,0.0724,TRUE,.
+β-N-acetylglucosaminidase (log),(Intercept),0.9915,0.289,3.431,0.0045,TRUE,**
+β-N-acetylglucosaminidase (log),WT_drawdown_cm,0.0563,0.0189,2.985,0.0105,TRUE,*
+Acid phosphatase (log),(Intercept),2.6126,0.1337,19.5435,0,TRUE,***
+Acid phosphatase (log),WT_drawdown_cm,0.0514,0.0087,5.8975,1e-4,TRUE,***
