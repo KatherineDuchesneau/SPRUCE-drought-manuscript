@@ -1,0 +1,6 @@
+Drought_ID,Domain,Phylum,Class,Order,Family,Genus,Species,SPRUCE_ID,dsr_M00596,Methanogen_CO2_M00567,Methanogen_Acetate_M00357,Methanogen_Methanol_M00356,nif_M00175
+Peat-20-2-2022_S48-idba_metabat.73,Archaea,Halobacteriota,Methanosarcinia,Methanosarcinales,Methanosarcinaceae,Methanosarcina,,SPRUCE 2028,,,,,X
+Peat-17-2-2020_S27-spades_metabat.18,Archaea,Halobacteriota,Methanosarcinia,Methanosarcinales,Methanosarcinaceae,Methanosarcina,,SPRUCE 2026,,X,X,X,X
+Peat-11-2-2021_S33-spades_concoct.126,Archaea,Halobacteriota,Methanosarcinia,Methanotrichales,Methanotrichaceae,UBA114,UBA114 sp002506335,SPRUCE 2021,,X,,,
+Peat-6-2-2020_S21-spades_concoct.115,Archaea,Halobacteriota,Bog-38,Bog-38,Bog-38,Bog-38,Bog-38 sp003139855,SPRUCE 510,,X,X,,
+Peat-13-2-2020_S25-spades_concoct.114,Archaea,Methanobacteriota,Methanobacteria,Methanobacteriales,Methanobacteriaceae,Methanobacterium_A,,SPRUCE 556,,,X,X,X

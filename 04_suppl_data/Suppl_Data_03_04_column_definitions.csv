@@ -1,0 +1,10 @@
+column,definition
+feature,"Feature identifier, '<acquisition mode>_<retention time in min>_<precursor m/z>'."
+Acquisition_mode,Chromatographic method and polarity the feature was detected in.
+RT_min,"Chromatographic retention time, minutes."
+precursor_mz,Precursor m/z.
+Final_name,"Putative compound name. A name is an assignment, not an identification, unless Annotation_Confidence is L1. Stereoisomeric assignments that in-silico methods cannot separate are reported once, without a stereodescriptor."
+Name_n_features,Number of features in the full table carrying this same compound name.
+Name_status,"Whether the name is unique to this feature, shared with others, or the feature is unnamed. Features sharing a name are not replicates; compare RT_min and precursor_mz to judge whether they are isomers or adducts."
+Annotation_Confidence,"Metabolomics Standards Initiative level. L1, match to an authentic standard on precursor m/z (5 ppm), MS/MS spectrum and retention time (within 0.5 min), standards run on the same instrument, column and method as the samples. L2, full MS/MS match to mzCloud. L3, structure proposed computationally from predicted formula and compound class (SIRIUS, CSI:FingerID, CANOPUS, ClassyFire, ChemSpider). L4, molecular formula only, no putative name. L3 and L4 names are the best-matching candidate structure, not an identification."
+Area_CV_percent,"Compound Discoverer coefficient of variation of peak area for this compound across the sample set. This is dispersion across biological samples spanning a 0 to 9 degrees C warming gradient, three water-table regimes and three years, and is expected to be large for responsive features. It is not the pooled-QC relative standard deviation: the <30% QC RSD and <=25% correction-factor thresholds reported in the Supplementary Methods were applied to replicate injections of the pooled QC extract, which is a different quantity."

@@ -1,0 +1,28 @@
+response,formula,n,Estimate,Std_Error,z_value,p_value,term,sig,R2_marginal,R2_conditional,singular_fit
+Gallic-acid-equivalent reducing capacity,Gallic_acid_conc_mg_L ~ Temp_avg_top + WT_drawdown_cm,20,-4.533702294164859,7.886120592164836,-0.5748963943905786,0.5653613685824366,(Intercept),,0.493,0.493,FALSE
+Gallic-acid-equivalent reducing capacity,Gallic_acid_conc_mg_L ~ Temp_avg_top + WT_drawdown_cm,20,2.119228846394957,0.5424592124922083,3.906706343244925,9.356274695121622e-5,Temp_avg_top,***,0.493,0.493,FALSE
+Gallic-acid-equivalent reducing capacity,Gallic_acid_conc_mg_L ~ Temp_avg_top + WT_drawdown_cm,20,-0.27520401193682875,0.21380846989180757,-1.2871520575218038,0.1980412937959231,WT_drawdown_cm,,0.493,0.493,FALSE
+Sample NOSC (Level 1-3 annotations only),NOSC_L1L3 ~ Temp_avg_top + WT_drawdown_cm,27,-0.39950436373989295,0.009486316399405533,-42.113750682501816,0,(Intercept),***,0.032,0.032,FALSE
+Sample NOSC (Level 1-3 annotations only),NOSC_L1L3 ~ Temp_avg_top + WT_drawdown_cm,27,-3.013097803645756e-4,4.296027794273422e-4,-0.7013683216068101,0.4830731862183122,Temp_avg_top,,0.032,0.032,FALSE
+Sample NOSC (Level 1-3 annotations only),NOSC_L1L3 ~ Temp_avg_top + WT_drawdown_cm,27,-3.415610619347045e-5,1.1598106315129329e-4,-0.29449726761786094,0.7683779510192792,WT_drawdown_cm,,0.032,0.032,FALSE
+"Sample NOSC (enclosure RE dropped, singular)",NOSC ~ Temp_avg_top + WT_drawdown_cm,27,-0.048244481756446224,0.0010061535143520743,-47.94942428592906,0,(Intercept),***,0.033,0.033,FALSE
+"Sample NOSC (enclosure RE dropped, singular)",NOSC ~ Temp_avg_top + WT_drawdown_cm,27,-1.6423842741220858e-5,4.5565246624432466e-5,-0.36044669913877425,0.7185131093425485,Temp_avg_top,,0.033,0.033,FALSE
+"Sample NOSC (enclosure RE dropped, singular)",NOSC ~ Temp_avg_top + WT_drawdown_cm,27,-8.210034721988472e-6,1.2301376991353766e-5,-0.6674077810767881,0.5045116970488908,WT_drawdown_cm,,0.033,0.033,FALSE
+Porewater CH4 (mM),CH4mM ~ Temp_avg_top + WT_drawdown_cm + (1 | Plot),18,-0.18768754349820266,0.3405098824310649,-0.5511955839819109,0.5814996069695022,(Intercept),,0.437,0.651,FALSE
+Porewater CH4 (mM),CH4mM ~ Temp_avg_top + WT_drawdown_cm + (1 | Plot),18,0.03138762023194733,0.015288280253849932,2.053051076431126,0.040067624103870776,Temp_avg_top,*,0.437,0.651,FALSE
+Porewater CH4 (mM),CH4mM ~ Temp_avg_top + WT_drawdown_cm + (1 | Plot),18,-0.01732902449974475,0.00675771121870922,-2.564333387281788,0.01033741971336943,WT_drawdown_cm,*,0.437,0.651,FALSE
+Porewater CO2 (mM),CO2mM ~ Temp_avg_top + WT_drawdown_cm,18,-0.674645351437919,1.482390360008236,-0.4551064076227336,0.6490326884506654,(Intercept),,0.419,0.419,FALSE
+Porewater CO2 (mM),CO2mM ~ Temp_avg_top + WT_drawdown_cm,18,0.1755280250749468,0.06560033289675428,2.675718511233827,0.00745692457343308,Temp_avg_top,**,0.419,0.419,FALSE
+Porewater CO2 (mM),CO2mM ~ Temp_avg_top + WT_drawdown_cm,18,-0.063329467373403045,0.03576022764448426,-1.7709469862161553,0.0765695178890145,WT_drawdown_cm,.,0.419,0.419,FALSE
+Porewater CO2:CH4 ratio,CO2_CH4_ratio ~ Temp_avg_top * WT_drawdown_cm,18,8.608103516899924,7.899673601591013,1.0896783779985835,0.27585484388267495,(Intercept),,0.456,0.456,FALSE
+Porewater CO2:CH4 ratio,CO2_CH4_ratio ~ Temp_avg_top * WT_drawdown_cm,18,-0.034083400603106995,0.351277790082431,-0.09702691592061363,0.9227050194764688,Temp_avg_top,,0.456,0.456,FALSE
+Porewater CO2:CH4 ratio,CO2_CH4_ratio ~ Temp_avg_top * WT_drawdown_cm,18,-2.335188903998368,1.1364207102043784,-2.0548630300642783,0.03989223618554128,WT_drawdown_cm,*,0.456,0.456,FALSE
+Porewater CO2:CH4 ratio,CO2_CH4_ratio ~ Temp_avg_top * WT_drawdown_cm,18,0.13180584279956817,0.053717478677448846,2.4536863241666187,0.014140026423310477,Temp_avg_top:WT_drawdown_cm,*,0.456,0.456,FALSE
+Porewater CH4 ~ total methanogen activity,CH4mM ~ sum_Abundance + (1 | Plot),19,0.359834465300386,0.0769919398973686,4.673664097567234,2.9587309633942065e-6,(Intercept),***,0.139,0.647,FALSE
+Porewater CH4 ~ total methanogen activity,CH4mM ~ sum_Abundance + (1 | Plot),19,6.985331321307324,2.9542155468850386,2.364530011587253,0.018052964589757185,sum_Abundance,*,0.139,0.647,FALSE
+Annual CH4 flux ~ year x temperature (log scale),log_CH4_flux ~ Year * Temp_c + (1 | Plot),30,12.984239739174779,0.09296229002709247,139.6721158158939,0,(Intercept),***,0.868,0.963,FALSE
+Annual CH4 flux ~ year x temperature (log scale),log_CH4_flux ~ Year * Temp_c + (1 | Plot),30,0.6885570201900724,0.07010278298571501,9.822106781843184,9.043349488191998e-23,Year2020,***,0.868,0.963,FALSE
+Annual CH4 flux ~ year x temperature (log scale),log_CH4_flux ~ Year * Temp_c + (1 | Plot),30,0.9362300955411049,0.08694865943043367,10.767619669745095,4.8949277603760024e-27,Year2022,***,0.868,0.963,FALSE
+Annual CH4 flux ~ year x temperature (log scale),log_CH4_flux ~ Year * Temp_c + (1 | Plot),30,0.17050658943838776,0.037642242860113286,4.529660734404884,5.907847521454568e-6,Temp_c,***,0.868,0.963,FALSE
+Annual CH4 flux ~ year x temperature (log scale),log_CH4_flux ~ Year * Temp_c + (1 | Plot),30,0.1341977838991445,0.02818589838466964,4.761167519575495,1.9247619215150384e-6,Year2020:Temp_c,***,0.868,0.963,FALSE
+Annual CH4 flux ~ year x temperature (log scale),log_CH4_flux ~ Year * Temp_c + (1 | Plot),30,0.13056856805734068,0.02757425856416101,4.735161518614469,2.1888071506269814e-6,Year2022:Temp_c,***,0.868,0.963,FALSE

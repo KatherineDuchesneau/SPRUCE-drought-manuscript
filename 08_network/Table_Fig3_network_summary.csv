@@ -1,0 +1,2 @@
+stars_stability,edges_full,degree_threshold,abundance_quantile,n_MAGs_input,n_metabolites_input,n_samples,fig3_nodes,fig3_edges,n_connections,fig3_metabolites,fig3_metab_named,fig3_metab_by_class,fig3_metab_L1,fig3_metab_L2,fig3_metab_L3,fig3_metab_L4,edge_recovery_median,edge_recovery_min,edge_recovery_max,resample_replicates
+0.048879156713753744,23118,6,0.3,35,1386,27,47,67,40,27,12,15,6,7,14,0,0.52,0,0.92,50

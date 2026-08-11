@@ -1,0 +1,22 @@
+response,formula,n,Estimate,Std_Error,z_value,p_value,term,sig,R2_marginal,R2_conditional,singular_fit
+"Phenol oxidase (Gamma, log link)",mean_ActivtypH ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,18,-3.5736491591726463,1.1068268839358602,-3.2287336086966034,0.001243396589281964,(Intercept),**,0.6,0.6,FALSE
+"Phenol oxidase (Gamma, log link)",mean_ActivtypH ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,18,0.19770275548820346,0.08365825614122833,2.3632187019826234,0.01811697460784638,Temp_avg_top,*,0.6,0.6,FALSE
+"Phenol oxidase (Gamma, log link)",mean_ActivtypH ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,18,0.03607318712471107,0.014285713402307658,2.525123254879518,0.011565771722095976,WT_drawdown_cm,*,0.6,0.6,FALSE
+"Phenol oxidase (Gamma, log link)",mean_ActivtypH ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,18,-0.8594171275715288,0.39389874644899175,-2.1818224488379268,0.029122639109235005,CO2_TreatmentElevated,*,0.6,0.6,FALSE
+beta-glucosidase (log),BG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,-0.7629982049583014,1.0145434773464062,-0.752060628248249,0.45201459955334705,(Intercept),,0.687,0.687,FALSE
+beta-glucosidase (log),BG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,0.12604025388772278,0.07619278484783712,1.654228207295939,0.09808115366521232,Temp_avg_top,.,0.687,0.687,FALSE
+beta-glucosidase (log),BG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,0.05757853744756155,0.014974866382551692,3.8450117668262136,1.2054665384062996e-4,WT_drawdown_cm,***,0.687,0.687,FALSE
+beta-glucosidase (log),BG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,-0.6022180771249536,0.3602909859997918,-1.6714769464848658,0.09462750853784795,CO2_TreatmentElevated,.,0.687,0.687,FALSE
+Cellobiohydrolase (log),CB.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment + Temp_avg_top:WT_drawdown_cm,15,-5.62406969045068,2.320650068795113,-2.423488903422096,0.015372222889617884,(Intercept),*,0.49,0.49,FALSE
+Cellobiohydrolase (log),CB.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment + Temp_avg_top:WT_drawdown_cm,15,0.30310687941064796,0.16689442177407934,1.8161594389353282,0.06934591805549598,Temp_avg_top,.,0.49,0.49,FALSE
+Cellobiohydrolase (log),CB.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment + Temp_avg_top:WT_drawdown_cm,15,0.6737547056951159,0.25140624982393234,2.6799441388866323,0.007363444712567079,WT_drawdown_cm,**,0.49,0.49,FALSE
+Cellobiohydrolase (log),CB.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment + Temp_avg_top:WT_drawdown_cm,15,0.3673489897814204,0.6999455415165747,0.5248251013721494,0.5997047801909344,CO2_TreatmentElevated,,0.49,0.49,FALSE
+Cellobiohydrolase (log),CB.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment + Temp_avg_top:WT_drawdown_cm,15,-0.03861752874699238,0.015691787538754956,-2.4610025245126685,0.013854939117785722,Temp_avg_top:WT_drawdown_cm,*,0.49,0.49,FALSE
+beta-N-acetylglucosaminidase (log),NAG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,-0.3079790328356261,1.167475230596188,-0.2637992008433037,0.7919346504024359,(Intercept),,0.555,0.555,FALSE
+beta-N-acetylglucosaminidase (log),NAG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,0.12365694820835409,0.08767804539304438,1.410352473689656,0.1584356313907293,Temp_avg_top,,0.555,0.555,FALSE
+beta-N-acetylglucosaminidase (log),NAG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,0.04442872954176484,0.0172321699104005,2.578243469787854,0.009930400247454512,WT_drawdown_cm,**,0.555,0.555,FALSE
+beta-N-acetylglucosaminidase (log),NAG.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,-0.7628577791967938,0.4146010608260173,-1.8399802877420002,0.06577113139886934,CO2_TreatmentElevated,.,0.555,0.555,FALSE
+Acid phosphatase (log),PHOS.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,2.8245506098284947,0.6088802496418727,4.638926310206023,3.502238905388015e-6,(Intercept),***,0.744,0.744,FALSE
+Acid phosphatase (log),PHOS.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,-0.014993496144146634,0.0457272486541448,-0.3278897503225923,0.7429950237685685,Temp_avg_top,,0.744,0.744,FALSE
+Acid phosphatase (log),PHOS.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,0.05262701764507864,0.008987195309962616,5.855777673679771,4.747830219032297e-9,WT_drawdown_cm,***,0.744,0.744,FALSE
+Acid phosphatase (log),PHOS.h_log ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment,15,-0.019811254591564506,0.21622933900588726,-0.09162149171174734,0.9269987753528222,CO2_TreatmentElevated,,0.744,0.744,FALSE
