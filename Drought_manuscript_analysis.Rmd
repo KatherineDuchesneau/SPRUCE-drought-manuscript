@@ -1,0 +1,3887 @@
+---
+title: "Drought Manuscript Analysis - SPRUCE 2020–2022 surface peat"
+author: "Katherine Duchesneau"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+  pdf_document: default
+---
+
+## 1. HOUSEKEEPING
+
+```{r setup, warning=FALSE, message=FALSE}
+
+set.seed(1234)
+
+PROJ <- "/Users/katherineduchesneau/Library/CloudStorage/Dropbox-GaTech/Katherine Duchesneau/Drought paper/Drought_R_analyses"
+knitr::opts_knit$set(root.dir = PROJ)
+
+out_dir <- "2Revisions_out"
+
+# ------------------------------------------------------------------------------
+# 1.1  Run switches
+# ------------------------------------------------------------------------------
+
+# Refit every Maaslin2 model from the phyloseq objects. FALSE reads 03_maaslin/.
+REFIT_MAASLIN <- FALSE
+
+# The two large gene fits (RE_networked_ALL, RE_ALL_CAMPERgenes). Hours to
+# overnight. Only consulted when REFIT_MAASLIN is TRUE.
+REFIT_LARGE <- FALSE
+
+# Skip a refit when the stored fit came from the same inputs and the same model.
+MAASLIN_CACHE <- TRUE
+
+# TRUE runs SpiecEasi and writes se_FULL.RDS / assoMat_FULL.Rds into 08_network/.
+# FALSE reloads those two files and rebuilds the graph, tables and figure from them.
+# Set TRUE whenever the metabolite filter changes, or Figure 3 can carry an edge
+# the current filtering does not produce.
+RUN_NETWORK <- FALSE
+
+# Number of resampling replicates behind Check_Fig3_edge_stability.csv.
+RESAMPLE_N <- 50
+
+# Edge recovery is read from 00_inputs/Check_Fig3_edge_stability.csv when that
+# file matches the edge set actually plotted. When it does not, TRUE recomputes
+# the frequencies in place, at a cost of RESAMPLE_N SpiecEasi fits, and FALSE
+# stops the knit.
+RUN_RESAMPLE <- FALSE
+
+# Delete 01_metadata through 08_network before anything runs. 00_inputs is never
+# touched. 08_network is only cleared when RUN_NETWORK is TRUE.
+WIPE_OUTPUTS <- FALSE
+
+# ------------------------------------------------------------------------------
+# 1.2  Folders and path builders
+# ------------------------------------------------------------------------------
+
+DIRS <- c(raw     = "00_inputs",
+          meta    = "01_metadata",
+          ps      = "02_phyloseq",
+          maaslin = "03_maaslin",
+          sd      = "04_suppl_data",
+          fig     = "06_figures",
+          net     = "08_network")
+
+if (isTRUE(WIPE_OUTPUTS)) {
+  to_wipe <- setdiff(names(DIRS), "raw")
+  if (!isTRUE(RUN_NETWORK)) to_wipe <- setdiff(to_wipe, "net")
+  for (k in to_wipe) unlink(file.path(out_dir, DIRS[k]), recursive = TRUE)
+  message("WIPE_OUTPUTS: cleared ", paste(DIRS[to_wipe], collapse = ", "))
+}
+for (d in DIRS) dir.create(file.path(out_dir, d), recursive = TRUE, showWarnings = FALSE)
+
+p_raw  <- function(...) file.path(out_dir, DIRS["raw"],     ...)
+p_meta <- function(...) file.path(out_dir, DIRS["meta"],    ...)
+p_ps   <- function(...) file.path(out_dir, DIRS["ps"],      ...)
+p_ml   <- function(...) file.path(out_dir, DIRS["maaslin"], ...)
+p_sd   <- function(...) file.path(out_dir, DIRS["sd"],      ...)
+p_fig  <- function(...) file.path(out_dir, DIRS["fig"],     ...)
+p_net  <- function(...) file.path(out_dir, DIRS["net"],     ...)
+
+# Every input is read from 00_inputs. Nothing is read from anywhere else.
+p_raw_req <- function(name) {
+  p <- p_raw(name)
+  if (!file.exists(p)) stop(name, " is not in ", p_raw(""))
+  p
+}
+
+maaslin_path <- function(name) {
+  p <- p_ml(name)
+  if (!file.exists(p))
+    stop(name, " is not in ", p_ml(""), ". Set REFIT_MAASLIN <- TRUE.")
+  p
+}
+
+net_path <- function(name) {
+  p <- p_net(name)
+  if (!file.exists(p))
+    stop(name, " is not in ", p_net(""), ". Set RUN_NETWORK <- TRUE.")
+  p
+}
+
+# ------------------------------------------------------------------------------
+# 1.3  Packages
+# ------------------------------------------------------------------------------
+
+library(data.table)
+library(readr)
+library(tidyverse)
+library(stringr)
+library(reshape2)
+
+library(phyloseq)
+library(vegan)
+library(MASS)
+library(glmmTMB)
+library(MuMIn)
+library(Maaslin2)
+library(Hmisc)
+library(car)
+library(interactions)
+library(lmerTest)
+library(glmtoolbox)
+
+library(clusterProfiler)
+library(KEGGREST)
+
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(scico)
+library(wesanderson)
+library(ggsci)
+library(RColorBrewer)
+
+library(ggtree)
+library(ggtreeExtra)
+library(ggstar)
+library(ggnewscale)
+library(pals)
+
+library(igraph)
+library(ggraph)
+library(SpiecEasi)
+
+library(conflicted)
+conflict_prefer("summarise", "dplyr"); conflict_prefer("summarize", "dplyr")
+conflict_prefer("step",      "stats"); conflict_prefer("filter",    "dplyr")
+conflict_prefer("select",    "dplyr"); conflict_prefer("rename",    "dplyr")
+conflict_prefer("mutate",    "dplyr"); conflict_prefer("arrange",   "dplyr")
+conflict_prefer("count",     "dplyr"); conflict_prefer("slice",     "dplyr")
+
+# ------------------------------------------------------------------------------
+# 1.4  Colour palettes
+# ------------------------------------------------------------------------------
+
+allGroupsColors <- c("#FFDA77","#FFB24C","#FE8C3B","#F03B1F","#BD0026")
+
+cluster_colors <- c("Oxygen sensitive"           = "#D740F2",
+                    "Warming-inhibited"          = "#0066CC",
+                    "Warming-stimulated oxic"    = "#538F6B",
+                    "Warming-stimulated anoxic"  = "#CA9F01",
+                    "None"                       = "white")
+
+specialist_colors <- c("Oxic_specialist"   = "#A3C9F1",
+                       "Anoxic_specialist" = "#E24D7F",
+                       "Ambivalent"        = "#9900CC",
+                       "none"              = "white")
+
+# ------------------------------------------------------------------------------
+# 1.5  Constants
+# ------------------------------------------------------------------------------
+
+# Methanogens, a subset of the oxygen-sensitive cluster.
+METHANOGEN_IDS <- c("SPRUCE 510", "SPRUCE 2026", "SPRUCE 2021", "SPRUCE 556")
+
+# Warming-stimulated, oxic-preferring (WS-OX), n = 7
+WSOX_IDS <- c(
+  "SPRUCE 87",    # Proteobacteria REEB95
+  "SPRUCE 397",   # Proteobacteria Roseiarcus
+  "SPRUCE 675",   # Actinobacteriota Palsa-601
+  "SPRUCE 2042",  # Actinobacteriota PALSA-457
+  "SPRUCE 2183",  # Proteobacteria BOG-931
+  "SPRUCE 2185",  # Verrucomicrobiota
+  "SPRUCE 2313")  # Verrucomicrobiota Palsa-1447
+
+# Warming-stimulated, anoxic-preferring (WS-AN), n = 15
+WSAN_IDS <- c(
+  "SPRUCE 124",   # Acidobacteriota Sulfotelmatobacter
+  "SPRUCE 275",   # Proteobacteria Bog-1198
+  "SPRUCE 356",   # Actinobacteriota RAAP-2
+  "SPRUCE 607",   # Proteobacteria Bog-1198
+  "SPRUCE 2046",  # Proteobacteria 13-2-20CM-66-19
+  "SPRUCE 2049",  # Actinobacteriota Palsa-744
+  "SPRUCE 2053",  # Proteobacteria Bog-1198
+  "SPRUCE 2057",  # Desulfobacterota_B
+  "SPRUCE 2060",  # Acidobacteriota Palsa-343
+  "SPRUCE 2148",  # Actinobacteriota RAAP-2
+  "SPRUCE 2152",  # Acidobacteriota Palsa-343
+  "SPRUCE 2155",  # Actinobacteriota Palsa-744
+  "SPRUCE 2159",  # Actinobacteriota RAAP-2
+  "SPRUCE 2184",  # Acidobacteriota Palsa-288
+  "SPRUCE 2191")  # Proteobacteria BOG-931
+
+# Warming-inhibited (WI), n = 9
+WI_IDS <- c(
+  "SPRUCE 190",   # Myxococcota Fen-1118
+  "SPRUCE 600",   # Proteobacteria BOG-994
+  "SPRUCE 689",   # Acidobacteriota Acidoferrum
+  "SPRUCE 2226",  # Proteobacteria
+  "SPRUCE 2282",  # Verrucomicrobiota Palsa-1447
+  "SPRUCE 2287",  # Planctomycetota BOG-1363
+  "SPRUCE 2292",  # Acidobacteriota Bog-113
+  "SPRUCE 2293",  # Eremiobacterota
+  "SPRUCE 2294")  # Proteobacteria FEN-1191
+
+WARMING_RESPONSIVE_IDS <- c(WSOX_IDS, WSAN_IDS, WI_IDS)
+
+POLY_SUPERCLASSES <- c("Benzenoids",
+                       "Phenylpropanoids and polyketides",
+                       "Lignans, neolignans and related compounds")
+NETWORK_PHENOLIC_SUPERCLASSES <- c(POLY_SUPERCLASSES, "Organosulfur compounds")
+
+# Maaslin2 feature filtering, applied inside every model.
+MIN_PREVALENCE <- 0.10
+MIN_ABUNDANCE  <- 0
+
+# PhyloseqObj_metabolites.RDS holds already-normalised, already-log2 intensities,
+# identical to norm_auc_mean.csv. The relationship to the raw peak areas is
+#
+#   norm_ij = log2( 2 * M * x_ij / m_j )
+#
+# with x_ij the raw area under the curve, m_j the mean raw AUC of sample j across
+# all features, and M the grand mean of the raw matrix (M = mean of the m_j).
+# This is a sample-wise mean normalisation rescaled to the grand mean, then log2.
+# Section 2.9.1b checks the stored intensities against this formula.
+RAW_AUC_FILE <- "raw_auc_table.csv"   # optional; place in 00_inputs/
+
+# Compound Discoverer per-feature values: Area CV% (CV of peak area per
+# compound across the sample set) and the assigned MSI level. Keyed on `feature`.
+METAB_ANNOT_UPDATE_FILE <- "Metabolite_annotation_update.csv"
+
+# Input file names.
+MAG_ABUNDANCE_RDS <- "PhyloseqObj_droughtMAG_24_03_2025.RDS"
+MAG_ACTIVITY_RDS  <- "PhyloseqObj_droughtMAGactivity_24_03_2025.RDS"
+GENES_PS_FILE     <- "PhyloseqObj_GeneswithMAGs_normalizedRibosomal_NORMALIZEDmedian.RDS"
+HYDDB_PS_FILE     <- "PhyloseqObj_GeneswithMAGs_normalizedRibosomal_hydDB_noTREE.RDS"
+METAB_PS_FILE     <- "PhyloseqObj_metabolites.RDS"
+CLUSTER_CSV       <- "Clustered_MAG_edited.csv"
+MODULE_CSV        <- "Suppl_Data_15_methanogen_pathways.csv"
+
+# Annual modelled CH4 emission per enclosure, from Cory et al. (2025),
+# doi:10.1029/2024JG008371. Not produced by this pipeline; supplied as a keyed
+# CSV. Columns: Year, Plot, "CH4 flux" in umol m-2 y-1. The second row carries
+# the units and is dropped on read.
+CH4_FLUX_CSV <- "annualFluxesSPRUCE.csv"
+
+# The ten enclosures sampled in this study.
+STUDY_PLOTS <- c(4, 6, 8, 10, 11, 13, 16, 17, 19, 20)
+
+# Network settings.
+DEGREE_THRESHOLD <- 6
+ABUND_QUANTILE   <- 0.30
+
+# ------------------------------------------------------------------------------
+# 1.6  Helpers
+# ------------------------------------------------------------------------------
+
+# The two large phyloseq objects are read once each and cached.
+load_genes_ps <- local({
+  cached <- NULL
+  function() {
+    if (is.null(cached)) cached <<- readRDS(p_raw_req(GENES_PS_FILE))
+    cached
+  }
+})
+load_hyddb_ps <- local({
+  cached <- NULL
+  function() {
+    if (is.null(cached)) cached <<- readRDS(p_raw_req(HYDDB_PS_FILE))
+    cached
+  }
+})
+
+# Orientation-agnostic sample x feature matrix.
+sample_matrix <- function(ps) {
+  m <- as(otu_table(ps), "matrix")
+  if (taxa_are_rows(ps)) m <- t(m)
+  as.data.frame(m)
+}
+
+add_effect_size <- function(df) {
+  dplyr::mutate(df,
+    CI_lower = coef - 1.96 * stderr,
+    CI_upper = coef + 1.96 * stderr,
+    evidence = dplyr::case_when(
+      qval < 0.05 ~ "Confirmatory (FDR < 0.05)",
+      qval < 0.10 ~ "Suggestive (FDR < 0.10)",
+      pval < 0.05 ~ "Exploratory (nominal P < 0.05 only)",
+      TRUE        ~ "Not selected"))
+}
+
+fdr_summary <- function(res, model_label) {
+  res$results |>
+    dplyr::group_by(predictor = metadata) |>
+    dplyr::summarise(
+      n_tested  = dplyr::n(),
+      p_lt_0.05 = sum(pval < 0.05, na.rm = TRUE),
+      q_lt_0.05 = sum(qval < 0.05, na.rm = TRUE),
+      q_lt_0.10 = sum(qval < 0.10, na.rm = TRUE),
+      q_lt_0.25 = sum(qval < 0.25, na.rm = TRUE),
+      min_qval  = min(qval, na.rm = TRUE),
+      .groups   = "drop") |>
+    dplyr::mutate(model = model_label, .before = 1)
+}
+
+read_maaslin <- function(path, id_col = "feature", fix_spruce = FALSE) {
+  r <- readRDS(path)$results |> dplyr::rename(!!id_col := 1)
+  if (fix_spruce)
+    r[[id_col]] <- gsub("(SPRUCE)\\.(\\d+)", "\\1 \\2", r[[id_col]])
+  add_effect_size(r)
+}
+
+tidy_glmmtmb <- function(model, response) {
+  cf <- as.data.frame(summary(model)$coefficients$cond)
+  colnames(cf) <- c("Estimate", "Std_Error", "z_value", "p_value")
+  cf$term <- rownames(cf); rownames(cf) <- NULL
+  r2 <- suppressWarnings(try(r.squaredGLMM(model), silent = TRUE))
+  ok <- !inherits(r2, "try-error")
+  singular <- any(is.nan(cf$Std_Error))
+  data.frame(
+    response       = response,
+    formula        = paste(deparse(formula(model)), collapse = " "),
+    n              = nobs(model),
+    cf,
+    sig            = dplyr::case_when(cf$p_value < 0.001 ~ "***",
+                                      cf$p_value < 0.01  ~ "**",
+                                      cf$p_value < 0.05  ~ "*",
+                                      cf$p_value < 0.1   ~ ".", TRUE ~ ""),
+    R2_marginal    = if (ok) round(r2[1, "R2m"], 3) else NA_real_,
+    R2_conditional = if (ok) round(r2[1, "R2c"], 3) else NA_real_,
+    singular_fit   = singular,
+    row.names      = NULL)
+}
+
+# Refit without (1|Plot) when its variance is ~0 and the standard errors are NaN.
+drop_singular_re <- function(model, data, label) {
+  sd_plot <- tryCatch(attr(VarCorr(model)$cond$Plot, "stddev")[1],
+                      error = function(e) NA_real_)
+  nan_se  <- any(is.nan(as.data.frame(summary(model)$coefficients$cond)$`Std. Error`))
+  if (isTRUE(nan_se) || (!is.na(sd_plot) && sd_plot < 0.01)) {
+    f <- as.formula(gsub("\\s*\\+\\s*\\(1\\s*\\|\\s*Plot\\)", "",
+                         paste(deparse(formula(model)), collapse = " ")))
+    message(label, ": (1|Plot) variance is ~0 (sd = ", signif(sd_plot, 3),
+            "). Refitting without the random effect.")
+    return(list(model = glmmTMB(f, data = data, family = family(model)),
+                dropped_re = TRUE))
+  }
+  list(model = model, dropped_re = FALSE)
+}
+
+# Keep the interaction only if the LRT supports it.
+lrt_interaction <- function(f_full, f_noint, data, family = gaussian(), label = "") {
+  m_full  <- glmmTMB(f_full,  data = data, family = family)
+  m_noint <- glmmTMB(f_noint, data = data, family = family)
+  p <- anova(m_full, m_noint)$`Pr(>Chisq)`[2]
+  keep <- !is.na(p) && p < 0.05
+  message(label, ": interaction LRT P = ", signif(p, 3),
+          if (keep) " -> retained" else " -> dropped")
+  list(model = if (keep) m_full else m_noint, lrt_p = p, retained = keep)
+}
+
+# Shared Maaslin2 configuration: prevalence and abundance filtering inside the
+# model, no internal normalisation.
+# `transform` is passed through to Maaslin2. Its default there is "LOG", which is
+# right for count-like inputs but wrong for the metabolites: those are supplied
+# already log2 transformed, so leaving the default applies a second log. The
+# metabolite call therefore passes transform = "NONE". Every other model keeps
+# "LOG" unless and until its input is shown to be pre-transformed; the value
+# range printed below is the diagnostic for that.
+fit_maaslin <- function(ps, name, fixed, random = "Plot", features = NULL,
+                        min_prev = MIN_PREVALENCE, min_abun = MIN_ABUNDANCE,
+                        transform = "LOG") {
+  dat <- sample_matrix(ps)
+  if (!is.null(features)) dat <- dat[, intersect(features, colnames(dat)), drop = FALSE]
+  meta <- data.frame(sample_data(ps))
+  stopifnot(setequal(rownames(dat), rownames(meta)))
+  miss <- setdiff(c(fixed, random), names(meta))
+  if (length(miss))
+    stop(name, ": predictor(s) not in sample_data: ", paste(miss, collapse = ", "),
+         "\n  available: ", paste(sort(names(meta)), collapse = ", "))
+  allna <- c(fixed, random)[vapply(c(fixed, random),
+                                   \(v) all(is.na(meta[[v]])), logical(1))]
+  if (length(allna))
+    stop(name, ": predictor(s) present but entirely NA: ",
+         paste(allna, collapse = ", "))
+
+  kept <- sum(colMeans(dat > min_abun, na.rm = TRUE) >= min_prev)
+  message(sprintf("%s: %d samples, %d features, %d pass prevalence >= %.2f (%d dropped)",
+                  name, nrow(dat), ncol(dat), kept, min_prev, ncol(dat) - kept))
+
+  # An input with no zeros and a narrow total range has already been log
+  # transformed upstream, in which case transform = "LOG" applies a second one.
+  rng <- range(dat, na.rm = TRUE); nz <- sum(dat == 0, na.rm = TRUE)
+  message(sprintf("  %s: range %.4g to %.4g, %d zeros, transform = %s",
+                  name, rng[1], rng[2], nz, transform))
+  if (nz == 0 && rng[1] > 0 && rng[2] / rng[1] < 100 && transform == "LOG")
+    warning(name, ": input has no zeros and only a ", signif(rng[2] / rng[1], 3),
+            "-fold total range, so it looks already log transformed, but ",
+            "transform = \"LOG\" will log it again. Pass transform = \"NONE\" ",
+            "if that is the case.")
+
+  chr_sig <- function(x) sum(utf8ToInt(paste0(x, collapse = "")))
+  sig <- list(
+    fixed = fixed, random = random, min_prev = min_prev, min_abun = min_abun,
+    transform = transform,
+    dims = dim(dat),
+    names = c(chr_sig(rownames(dat)), chr_sig(colnames(dat))),
+    values = c(sum(dat, na.rm = TRUE), sum(dat^2, na.rm = TRUE), sum(is.na(dat))),
+    predictors = vapply(c(fixed, random), function(v) {
+      x <- meta[rownames(dat), v]
+      if (is.numeric(x)) sum(x, na.rm = TRUE) else chr_sig(as.character(x))
+    }, numeric(1)))
+
+  rds  <- p_ml(paste0(name, ".rds"))
+  sigf <- p_ml(paste0(name, ".signature.rds"))
+  if (isTRUE(MAASLIN_CACHE) && file.exists(rds) && file.exists(sigf) &&
+      isTRUE(all.equal(readRDS(sigf), sig))) {
+    message("  ", name, ": cached fit matches these inputs, skipping refit.")
+    return(invisible(readRDS(rds)))
+  }
+
+  m <- Maaslin2(
+    input_data = dat, input_metadata = meta[rownames(dat), , drop = FALSE],
+    min_abundance = min_abun, min_prevalence = min_prev, normalization = "NONE",
+    transform = transform,
+    output = p_ml(name), fixed_effects = fixed, random_effects = random)
+  saveRDS(m, rds)
+  saveRDS(sig, sigf)
+  invisible(m)
+}
+
+MODEL_TABLE <- list()
+FILE_LOG    <- character(0)
+register_model <- function(x) { MODEL_TABLE[[length(MODEL_TABLE) + 1]] <<- x; invisible(x) }
+write_out <- function(x, path, ...) {
+  readr::write_csv(x, path, ...)
+  FILE_LOG <<- c(FILE_LOG, path)
+  message("wrote ", path, "  (", nrow(x), " rows)")
+  invisible(x)
+}
+save_fig <- function(plot, path, ...) {
+  ggsave(path, plot, ...)
+  FILE_LOG <<- c(FILE_LOG, path)
+  invisible(path)
+}
+
+# ------------------------------------------------------------------------------
+# Metabolite feature-ID parsing and annotation-name bookkeeping.
+#
+# Feature IDs are "<acquisition mode>_<retention time, min>_<precursor m/z>",
+# e.g. "RP_6.745_275.15998". Splitting them into their own columns lets a reader
+# judge whether two features carrying the same compound name are isomers,
+# adducts or redundant assignments.
+# ------------------------------------------------------------------------------
+
+parse_feature_id <- function(feature) {
+  m   <- stringr::str_match(feature, "^([A-Za-z]+)_([0-9.]+)_([0-9.]+)$")
+  bad <- is.na(m[, 1]) & !is.na(feature)
+  if (any(bad))
+    warning(sum(bad), " feature ID(s) do not match '<mode>_<RT>_<mz>' and were ",
+            "left as NA, e.g. ", paste(utils::head(feature[bad], 3), collapse = ", "))
+  data.frame(Acquisition_mode = m[, 2],
+             RT_min           = suppressWarnings(as.numeric(m[, 3])),
+             precursor_mz     = suppressWarnings(as.numeric(m[, 4])),
+             stringsAsFactors = FALSE)
+}
+
+# ------------------------------------------------------------------------------
+# MSI annotation levels
+# ------------------------------------------------------------------------------
+# Annotation sub-levels are mapped onto the standard four-level MSI scheme
+# (Rajakaruna et al. 2026, doi:10.1093/ismeco/ycag223): L1 authentic standard;
+# L2 mzCloud MS/MS match; L3 computational structure proposal; L4 formula only.
+MSI4_MAP <- c(L1 = "L1", L2 = "L2",
+              L2.1 = "L3", L2.2 = "L3", L2.3 = "L3",
+              L3.1 = "L4", L3.2 = "L4", L3.3 = "L4",
+              L3 = "L3", L4 = "L4")   # idempotent: recoding twice is a no-op
+
+to_msi4 <- function(conf) {
+  conf <- trimws(as.character(conf))
+  conf[conf %in% c("", "NA")] <- NA_character_
+  out  <- unname(MSI4_MAP[conf])
+  unmapped <- !is.na(conf) & is.na(out)
+  if (any(unmapped))
+    stop("Annotation_Confidence values with no entry in MSI4_MAP: ",
+         paste(sort(unique(conf[unmapped])), collapse = ", "),
+         ". Extend MSI4_MAP rather than letting them through as NA.")
+  out
+}
+
+# A name is an identification claim; L3 and L4 names are the best-matching
+# candidate structure. Anything at or below L3, and anything with no level at
+# all, is labelled in Figure 3 by compound class and feature ID instead.
+MSI_NAMEABLE <- c("L1", "L2")
+
+# Two names for what is one putative assignment. In-silico fragmentation and
+# predicted retention time cannot resolve stereochemistry, so the diastereomer
+# pair below is reported once, without a stereodescriptor. Matched on Final_name.
+NAME_ALIASES <- c(
+  "(5R,6S)-5-Hydroxy-4-methoxy-6-(2-phenylethyl)-5,6-dihydro-2H-pyran-2-one" =
+    "5-Hydroxy-4-methoxy-6-(2-phenylethyl)-5,6-dihydro-2H-pyran-2-one (stereochemistry unresolved)",
+  "(5S,6S)-5-hydroxy-4-methoxy-6-(2-phenylethyl)-5,6-dihydro-2H-pyran-2-one" =
+    "5-Hydroxy-4-methoxy-6-(2-phenylethyl)-5,6-dihydro-2H-pyran-2-one (stereochemistry unresolved)")
+
+apply_name_aliases <- function(x) {
+  hit <- !is.na(x) & x %in% names(NAME_ALIASES)
+  if (any(hit))
+    message("name aliases: collapsed ", sum(hit), " feature name(s) onto ",
+            length(unique(unname(NAME_ALIASES[x[hit]]))), " assignment(s)")
+  x[hit] <- unname(NAME_ALIASES[x[hit]])
+  x
+}
+
+# Features are never merged. A compound name carried by more than one feature is
+# labelled as such and the count travels with it into the supplementary tables,
+# so a shared name can be read as what it is rather than as replication.
+add_name_multiplicity <- function(df, name_col = "Final_name") {
+  nm <- df[[name_col]]
+  nm[nm %in% c("", "M", "NA")] <- NA_character_
+  n  <- ave(rep(1L, length(nm)), ifelse(is.na(nm), "unnamed", nm), FUN = length)
+  df$Name_n_features <- ifelse(is.na(nm), NA_integer_, as.integer(n))
+  df$Name_status <- dplyr::case_when(
+    is.na(nm)              ~ "unnamed feature",
+    df$Name_n_features > 1 ~ "name shared with other features",
+    TRUE                   ~ "name unique to this feature")
+  df
+}
+
+# ------------------------------------------------------------------------------
+# The one place the metabolite phyloseq is read
+# ------------------------------------------------------------------------------
+# The NOSC block, the Maaslin2 block and the network all read the metabolite
+# phyloseq through this function, so the same filtered feature set is used
+# throughout.
+#
+# Two transformations happen here and nowhere else:
+#
+#   1. "M" is the unnamed sentinel in the annotation table, not a
+#      compound. Setting it to NA is what filters it: add_name_multiplicity(),
+#      the class-level analysis, the NOSC subset and the network all key off a
+#      non-missing Final_name.
+#   2. Annotation_Confidence is mapped onto the standard four MSI levels.
+#      The original value is kept in
+#      Annotation_Confidence_sublevel so nothing is lost.
+#
+# METAB_M_FILTERED and METAB_MSI_CENSUS are written on the first call and read
+# back by the reporting code, so the counts quoted in the Methods come from the
+# same object the analysis used.
+METAB_M_FILTERED <- NA_integer_
+METAB_MSI_CENSUS <- NULL
+
+read_metab_ps <- function(quiet = FALSE) {
+  ps  <- readRDS(p_raw_req(METAB_PS_FILE))
+  tx  <- as.data.frame(tax_table(ps), stringsAsFactors = FALSE)
+
+  n_M <- sum(tx$Final_name %in% "M", na.rm = TRUE)
+  tx$Final_name[tx$Final_name %in% c("M", "")] <- NA_character_
+  tx$Final_name <- apply_name_aliases(tx$Final_name)
+
+  tx$Annotation_Confidence_sublevel <- tx$Annotation_Confidence
+  tx$Annotation_Confidence <- to_msi4(tx$Annotation_Confidence_sublevel)
+
+  census <- as.data.frame(table(
+    MSI_level = factor(tx$Annotation_Confidence,
+                       levels = c("L1", "L2", "L3", "L4"), exclude = NULL)),
+    responseName = "n_features")
+
+  METAB_M_FILTERED <<- n_M
+  METAB_MSI_CENSUS <<- census
+
+  if (!quiet) {
+    cat(sprintf("Unnamed sentinel: %d feature(s) had Final_name == \"M\", filtered to NA\n",
+                n_M))
+    cat("\n=== Annotation confidence census, four-level scheme ===\n")
+    print(as.data.frame(table(
+      old = factor(tx$Annotation_Confidence_sublevel, exclude = NULL),
+      new = factor(tx$Annotation_Confidence,          exclude = NULL))) |>
+      subset(Freq > 0))
+    print(census)
+  }
+
+  tax_table(ps) <- as.matrix(tx)
+  ps
+}
+
+# Legends are written to <name>_legend.pdf rather than placed on the panels, so
+# panel aspect ratios stay identical across a multi-panel figure.
+save_legend <- function(plot, path, width = 3, height = 4) {
+  lg <- try(ggpubr::get_legend(plot + theme(legend.position = "right")),
+            silent = TRUE)
+  if (inherits(lg, "try-error") || is.null(lg)) {
+    message("no legend to extract for ", basename(path)); return(invisible(NULL))
+  }
+  ggsave(path, ggpubr::as_ggplot(lg), width = width, height = height)
+  FILE_LOG <<- c(FILE_LOG, path)
+  invisible(path)
+}
+
+legend_path <- function(path) sub("\\.pdf$", "_legend.pdf", path)
+
+save_fig_nolegend <- function(plot, path, ..., legend_width = 3, legend_height = 4) {
+  save_legend(plot, legend_path(path), width = legend_width, height = legend_height)
+  save_fig(plot + theme(legend.position = "none"), path, ...)
+}
+
+# ------------------------------------------------------------------------------
+# 1.7  Hand-curated supplementary sheets
+# ------------------------------------------------------------------------------
+# Supplementary Data 15 and 18 have no code path. They are copied from 00_inputs
+# so that 04_suppl_data can be regenerated in full.
+
+for (f in c("Suppl_Data_15_methanogen_pathways.csv",
+            "Suppl_Data_18_annotation_citations.csv")) {
+  file.copy(p_raw_req(f), p_sd(f), overwrite = TRUE)
+  FILE_LOG <- c(FILE_LOG, p_sd(f))
+}
+
+message("REFIT_MAASLIN = ", REFIT_MAASLIN, " | REFIT_LARGE = ", REFIT_LARGE,
+        " | RUN_NETWORK = ", RUN_NETWORK, " | WIPE_OUTPUTS = ", WIPE_OUTPUTS)
+```
+
+## 2. METADATA AND ENVIRONMENTAL MODELS
+
+Primary predictors throughout:
+
+- `Temp_avg_top`   = (AvgTemp10cm + AvgTemp20cm) / 2, May–Aug (°C)
+- `WT_drawdown_cm` = positive values are deeper and drier (cm)
+
+```{r load-metadata}
+
+metadata_df <- left_join(
+    read.csv(p_raw_req("metadata.csv")),
+    read.csv(p_raw_req("Spruce_summer2020-2022_temp_WT_Moisture_MayJuneJulyAugust.csv")) |>
+      dplyr::select(-any_of("X")),
+    by = c("Plot", "Year")) |>
+  mutate(
+    Year              = as.factor(Year),
+    Plot              = as.factor(Plot),
+    Warming           = as.factor(Warming),
+    Warming_Treatment = as.factor(Warming_Treatment),
+    CO2_Treatment     = as.factor(CO2_Treatment),
+    Depth             = as.factor(Depth),
+    CO2               = as.factor(CO2),
+    Warming_Treatment.ord = forcats::fct_relevel(
+      Warming, "0 ºC", "2.25 ºC", "4.5 ºC", "6.75 ºC", "9 ºC"),
+    WT_drawdown       = 0 - AvgWTE_normalized,
+    WT_drawdown_cm    = WT_drawdown * 100,
+    Temp_avg_top      = (AvgTemp10cm + AvgTemp20cm) / 2,
+    SoilWater_avg_top = (AvgMoisture0cm + AvgMoisture20cm) / 2)
+
+write_out(metadata_df, p_meta("metadata_df.csv"))
+```
+
+## 2.2 WATER TABLE AND MOISTURE MODELS
+
+One observation per enclosure per year, so no random effect. Stepwise AIC.
+
+```{r env-models}
+
+cat("=== Normality checks ===\n")
+cat("WT_drawdown_cm: p =", round(shapiro.test(metadata_df$WT_drawdown_cm)$p.value, 3), "\n")
+cat("AvgMoisture0cm: p =", round(shapiro.test(metadata_df$AvgMoisture0cm)$p.value, 3), "\n")
+
+step.WTE <- step(glm((WT_drawdown_cm + 100) ~ Temp_avg_top + Temp_avg_top:Year,
+                     data = metadata_df, family = Gamma(link = "identity")), trace = 0)
+cat("\n===== Water table drawdown (Gamma GLM) =====\n")
+cat("Adj R2 =", round(glmtoolbox::adjR2(step.WTE), 3), "\n"); print(summary(step.WTE))
+
+step.moist0 <- step(lm(AvgMoisture0cm ~ Temp_avg_top + Temp_avg_top:Year,
+                       data = metadata_df), trace = 0)
+cat("\n===== Surface moisture (0 cm) =====\n")
+cat("Adj R2 =", round(summary(step.moist0)$adj.r.squared, 3), "\n"); print(summary(step.moist0))
+
+step.moist20 <- step(lm(AvgMoisture20cm ~ Temp_avg_top + Temp_avg_top:Year,
+                        data = metadata_df), trace = 0)
+cat("\n===== Deep moisture (20 cm) =====\n")
+cat("Adj R2 =", round(summary(step.moist20)$adj.r.squared, 3), "\n"); print(summary(step.moist20))
+```
+
+## 2.3 SUPPLEMENTARY FIGURE S1
+
+```{r suppl-fig-watertable, fig.width=12, fig.height=6}
+
+env_plot <- metadata_df[!is.na(metadata_df$Warming_Treatment.ord), ]
+
+boxplot_by_year <- function(y, ylab) {
+  ggplot(env_plot, aes(x = Year, y = .data[[y]], fill = Warming_Treatment.ord)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.15, alpha = 0.5, size = 2, pch = 21, color = "black") +
+    scale_fill_manual(values = allGroupsColors) +
+    labs(x = "Year", y = ylab, fill = "Warming\ntreatment") +
+    theme_bw() +
+    theme(axis.text = element_text(size = 14), axis.title = element_text(size = 16),
+          legend.text = element_text(size = 12), legend.title = element_text(size = 13))
+}
+
+FIG_S1 <- ggarrange(
+  boxplot_by_year("AvgTemp10cm",    "Mean temperature at 10 cm\n(May-Aug, ºC)"),
+  boxplot_by_year("WT_drawdown_cm", "Water table drawdown (cm)\n(May-Aug average)"),
+  ncol = 2, common.legend = TRUE, legend = "right",
+  labels = c("C", "D"), font.label = list(size = 18))
+save_fig(FIG_S1, p_fig("Figure_S1_environmental_drivers.pdf"), width = 12, height = 5)
+```
+
+## 2.4 MAG TAXONOMY AND CAMPER ANNOTATION
+
+```{r load-mag-annotations}
+
+Genes_withMAG_NORMALIZED <- load_genes_ps()
+tax_df <- data.frame(tax_table(readRDS(p_raw_req(MAG_ABUNDANCE_RDS))))
+
+df_CAMPER <- subset_taxa(Genes_withMAG_NORMALIZED, CAMPER_id != "") |>
+  subset_taxa(!is.na(CAMPER_module)) |>
+  psmelt() |>
+  dplyr::select(SPRUCE_ID, CAMPER_id, CAMPER_oxygen) |>
+  group_by(SPRUCE_ID, CAMPER_oxygen) |>
+  summarise(num_CAMPER_ids_detected = n_distinct(CAMPER_id), .groups = "drop") |>
+  pivot_wider(names_from = CAMPER_oxygen, values_from = num_CAMPER_ids_detected) |>
+  replace_na(list(oxic = 0, anoxic = 0)) |>
+  mutate(Specialist_phenol_decomposition = case_when(
+    anoxic / (anoxic + oxic) >= 0.6 ~ "Anoxic_phenol_decomposition",
+    oxic   / (anoxic + oxic) >= 0.6 ~ "Oxic_phenol_decomposition",
+    TRUE                            ~ "Ambivalent_phenol_decomposition"))
+write_out(df_CAMPER, p_meta("df_CAMPER.csv"))
+
+tax_df$SPRUCE_ID_num <- as.numeric(gsub("SPRUCE (\\d+)", "\\1", tax_df$SPRUCE_ID))
+cat("New MAGs (ID >= 2000):", sum(tax_df$SPRUCE_ID_num >= 2000, na.rm = TRUE), "\n")
+
+# ------------------------------------------------------------------------------
+# MAG set reconciliation
+# ------------------------------------------------------------------------------
+# The Results state that polyphenol degradation genes are nearly ubiquitous,
+# ">99% encode oxygen-dependent or oxygen-independent enzymes". The numerator of
+# that percentage is the number of genomes in df_CAMPER, which is derived from
+# the gene object. The paper's denominator is the 294 dereplicated MAGs in the
+# abundance and activity objects. The two are not the same set, so the block
+# below reports every count and both percentages rather than assuming they agree.
+
+mag_ids <- function(ps) {
+  tt <- data.frame(tax_table(ps))
+  if (!"SPRUCE_ID" %in% names(tt)) return(character(0))
+  unique(na.omit(as.character(tt$SPRUCE_ID)))
+}
+mag_sets <- list(
+  gene_object       = mag_ids(Genes_withMAG_NORMALIZED),
+  abundance_object  = unique(na.omit(as.character(tax_df$SPRUCE_ID))),
+  activity_object   = mag_ids(readRDS(p_raw_req(MAG_ACTIVITY_RDS))),
+  df_CAMPER         = unique(as.character(df_CAMPER$SPRUCE_ID)))
+
+mag_set_sizes <- data.frame(object = names(mag_sets),
+                            n_MAGs = vapply(mag_sets, length, integer(1)),
+                            row.names = NULL)
+print(mag_set_sizes, row.names = FALSE)
+
+mag_pairs <- list(c("gene_object", "abundance_object"),
+                  c("df_CAMPER",   "abundance_object"),
+                  c("df_CAMPER",   "gene_object"),
+                  c("activity_object", "abundance_object"))
+mag_set_diffs <- purrr::map_dfr(mag_pairs, function(pr) {
+  a <- mag_sets[[pr[1]]]; b <- mag_sets[[pr[2]]]
+  data.frame(set_A = pr[1], set_B = pr[2],
+             n_A = length(a), n_B = length(b),
+             n_shared    = length(intersect(a, b)),
+             n_only_in_A = length(setdiff(a, b)),
+             n_only_in_B = length(setdiff(b, a)),
+             only_in_A = paste(sort(setdiff(a, b)), collapse = "; "),
+             only_in_B = paste(sort(setdiff(b, a)), collapse = "; "))
+})
+print(mag_set_diffs[, 1:7], row.names = FALSE)
+
+# The percentage as it can be computed on each candidate denominator.
+n_camper <- length(intersect(mag_sets$df_CAMPER, mag_sets$gene_object))
+camper_pct <- data.frame(
+  denominator = c("genomes in the gene object", "294 MAGs in the abundance object"),
+  n_denominator = c(length(mag_sets$gene_object), length(mag_sets$abundance_object)),
+  n_with_phenol_active_gene = c(
+    n_camper,
+    length(intersect(mag_sets$df_CAMPER, mag_sets$abundance_object))))
+camper_pct$percent <- round(100 * camper_pct$n_with_phenol_active_gene /
+                            camper_pct$n_denominator, 1)
+print(camper_pct, row.names = FALSE)
+
+if (length(setdiff(mag_sets$gene_object, mag_sets$abundance_object)))
+  message("The gene object carries ", length(setdiff(mag_sets$gene_object,
+          mag_sets$abundance_object)), " genome(s) absent from the 294-MAG set.")
+```
+
+## 2.5 ENZYME ASSAY DATA
+
+```{r load-enzyme-data}
+
+ABTS <- read.csv(p_raw_req("ABTS_fullDataset.csv"), row.names = 1) |>
+  (\(x) x[x$Depth == "10-20 cm", c(1, 6, 18, 28, 29)])() |>
+  mutate(Year = as.factor(year), Plot = as.factor(Plot), Depth = as.factor(Depth))
+
+enz2 <- read.csv(p_raw_req("ExoEnz_fullDataset.csv"), row.names = 1) |>
+  (\(x) x[x$Duplicate != "Yes" & x$Depth == "10-20 cm", c(1, 3, 8:11, 21, 22)])() |>
+  dplyr::select(-Duplicate) |>
+  dplyr::rename(Year = 7) |>
+  mutate(Year = as.factor(Year), Plot = as.factor(Plot)) |>
+  left_join(metadata_df, by = c("Plot", "Year", "Depth")) |>
+  filter(!is.na(Warming_Treatment)) |>
+  mutate(BG.h_log  = log(BG.h),  CB.h_log   = log(CB.h),
+         NAG.h_log = log(NAG.h), PHOS.h_log = log(PHOS.h))
+
+write_out(ABTS, p_meta("ABTS.csv"))
+write_out(enz2, p_meta("enz2.csv"))
+```
+
+## 2.6 ENZYME MODELS AND SUPPLEMENTARY FIGURE S3
+
+Gamma GLMM (log link) for phenol oxidase, Gaussian GLMM on log-transformed
+hydrolase activity. Selection follows the porewater gas models in section 2.10:
+the temperature by drawdown interaction is kept only where the LRT supports it,
+and the random intercept is dropped when its variance is estimated at zero.
+
+`CO2_Treatment` is fitted as a fixed effect here and is not in the dbRDA. The
+dbRDA conditions on enclosure with `Condition(Plot)`, which removes all
+among-enclosure variation, and CO2 is assigned per enclosure, so it is removed
+along with it and cannot be estimated. These models put enclosure in as a random
+intercept instead, which models the among-enclosure variation rather than
+sweeping it out, so an enclosure-level fixed effect stays estimable.
+
+```{r enzyme-models-and-fig}
+
+enz_ABTS <- left_join(ABTS, metadata_df, by = c("Plot", "Year", "Depth")) |>
+  filter(!is.na(Warming_Treatment)) |>
+  group_by(Name) |>
+  mutate(mean_ActivtypH = mean(ActivtypH, na.rm = TRUE)) |>
+  ungroup() |>
+  distinct(Sample, .keep_all = TRUE)
+
+POX_LABEL <- "Phenol oxidase (Gamma, log link)"
+pox_lrt <- lrt_interaction(
+  mean_ActivtypH ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment +
+    Temp_avg_top:WT_drawdown_cm + (1 | Plot),
+  mean_ActivtypH ~ Temp_avg_top + WT_drawdown_cm + CO2_Treatment + (1 | Plot),
+  enz_ABTS, family = Gamma(link = "log"), label = "Phenol oxidase")
+pox_fixed <- drop_singular_re(pox_lrt$model, enz_ABTS, POX_LABEL)
+pox <- list(model = pox_fixed$model, dropped_re = pox_fixed$dropped_re,
+            lrt_p = pox_lrt$lrt_p)
+register_model(tidy_glmmtmb(pox$model, POX_LABEL))
+print(tidy_glmmtmb(pox$model, POX_LABEL))
+
+fit_enz <- function(resp, label) {
+  f <- function(rhs) as.formula(paste(resp, "~", rhs))
+  r <- lrt_interaction(
+    f("Temp_avg_top + WT_drawdown_cm + CO2_Treatment + Temp_avg_top:WT_drawdown_cm + (1|Plot)"),
+    f("Temp_avg_top + WT_drawdown_cm + CO2_Treatment + (1|Plot)"),
+    enz2, family = gaussian(), label = label)
+  fixed <- drop_singular_re(r$model, enz2, label)
+  register_model(tidy_glmmtmb(fixed$model, label))
+  list(model = fixed$model, dropped_re = fixed$dropped_re, lrt_p = r$lrt_p)
+}
+res_BG   <- fit_enz("BG.h_log",   "beta-glucosidase (log)")
+res_CB   <- fit_enz("CB.h_log",   "Cellobiohydrolase (log)")
+res_NAG  <- fit_enz("NAG.h_log",  "beta-N-acetylglucosaminidase (log)")
+res_PHOS <- fit_enz("PHOS.h_log", "Acid phosphatase (log)")
+
+FIG_S3A <- ggplot(enz_ABTS, aes(x = WT_drawdown_cm, y = mean_ActivtypH)) +
+  geom_point(aes(fill = Warming_Treatment.ord, shape = Year), colour = "black", size = 4) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed", linewidth = 1, se = FALSE) +
+  scale_shape_manual(values = c(22, 24)) + scale_fill_manual(values = allGroupsColors) +
+  guides(fill = guide_legend("Temperature\ntreatment", override.aes = list(shape = 21))) +
+  xlab("Water table drawdown (cm)") +
+  ylab(expression(Phenol ~ oxidase ~ activity ~ "(" * mu * "mol/kg*h)")) +
+  theme_bw() +
+  theme(legend.position = "none", axis.text = element_text(size = 16),
+        axis.title = element_text(size = 16))
+
+enz2.long <- melt(enz2, id = c("WT_drawdown", "Warming_Treatment.ord", "Year"),
+                  measure = c("BG.h", "CB.h", "NAG.h", "PHOS.h"))
+colnames(enz2.long)[4] <- "Hydrolase"
+levels(enz2.long$Hydrolase) <- c("beta-glucosidase", "cellobiohydrolase",
+                                 "beta-N-acetylglucosaminidase", "acid phosphatase")
+
+FIG_S3B <- ggplot(enz2.long, aes(x = WT_drawdown * 100, y = value, fill = Hydrolase)) +
+  geom_smooth(aes(color = Hydrolase), method = "lm", se = FALSE,
+              linetype = "dashed", linewidth = 1) +
+  geom_point(aes(fill = Hydrolase, shape = Year), size = 5) +
+  scale_shape_manual(values = c(22, 24)) +
+  guides(shape = "none",
+         fill  = guide_legend("Hydrolase", nrow = 4, byrow = TRUE,
+                              override.aes = list(shape = 21))) +
+  scale_fill_npg() + scale_color_npg() +
+  scale_y_continuous(trans = "log", labels = scales::label_number(accuracy = 0.01)) +
+  ylab(expression(Hydrolase ~ activity ~ "(" * mu * "mol/kg*h)")) +
+  xlab("Water table drawdown (cm)") +
+  theme_bw() +
+  theme(legend.position = "bottom", axis.text = element_text(size = 16),
+        axis.title = element_text(size = 16))
+
+save_fig(ggarrange(FIG_S3A, FIG_S3B, ncol = 2, labels = c("A", "B"),
+                   font.label = list(size = 18)),
+         p_fig("Figure_S3_enzyme_activity.pdf"), width = 10, height = 5)
+```
+
+## 2.7 POREWATER PHENOLICS
+
+```{r load-phenolics}
+
+Spruce.phenolics1 <- read.csv(p_raw_req("Spruce_phenolics.csv")) |>
+  separate(Date, c("Year", "Month", "Day"), sep = "-") |>
+  filter(Year %in% c("2020", "2021", "2022"), Depth %in% c("25")) |>
+  mutate(Plot = as.factor(gsub("[A-Za-z]+(\\d+)", "\\1", Plot)), Year = as.factor(Year)) |>
+  dplyr::select(Year, Plot, Gallic_acid_conc_mg_L) |>
+  group_by(Plot, Year) |>
+  summarise(across(everything(), \(x) mean(x, na.rm = TRUE)), .groups = "drop") |>
+  left_join(metadata_df, by = c("Plot", "Year")) |>
+  na.omit() |>
+  as.data.frame()
+
+cat("Gallic acid Shapiro P =",
+    round(shapiro.test(Spruce.phenolics1$Gallic_acid_conc_mg_L)$p.value, 3), "\n")
+
+phen <- lrt_interaction(
+  Gallic_acid_conc_mg_L ~ Temp_avg_top + WT_drawdown_cm + Temp_avg_top:WT_drawdown_cm + (1|Plot),
+  Gallic_acid_conc_mg_L ~ Temp_avg_top + WT_drawdown_cm + (1|Plot),
+  Spruce.phenolics1, label = "Gallic acid")
+phen_fix <- drop_singular_re(phen$model, Spruce.phenolics1, "Gallic acid")
+step_phenol <- phen_fix$model
+register_model(tidy_glmmtmb(step_phenol, "Gallic-acid-equivalent reducing capacity"))
+print(tidy_glmmtmb(step_phenol, "Gallic-acid-equivalent reducing capacity"))
+```
+
+## 2.8 METABOLOMICS: NOSC
+
+NOSC = -((-z + 4C + H - 3N - 2O + 5P - 2S) / C) + 4, with z = 0, from the KEGG
+formula. Formulae that will not parse, or that contain no carbon, return NA and
+are excluded. The sample-level value is the relative-abundance-weighted mean.
+
+```{r load-metabolomics-nosc}
+
+metabolites_phylo <- read_metab_ps()
+
+if (!identical(taxa_names(metabolites_phylo),
+               unname(as.character(tax_table(metabolites_phylo)[, "Feature"]))))
+  stop("taxa_names() and the Feature column of the metabolite tax table are not ",
+       "the same vector.")
+
+calculate_nosc <- function(formula, z = 0) {
+  if (is.na(formula) || formula == "") return(NA_real_)
+  el <- str_match_all(formula, "([A-Z][a-z]*)(\\d*)")[[1]]
+  if (nrow(el) == 0) return(NA_real_)
+  n <- as.numeric(el[, 3]); n[is.na(n)] <- 1
+  cnt <- setNames(n, el[, 2])
+  g <- function(s) if (s %in% names(cnt)) cnt[[s]] else 0
+  C <- g("C"); if (C == 0) return(NA_real_)
+  -((-z + 4*C + g("H") - 3*g("N") - 2*g("O") + 5*g("P") - 2*g("S")) / C) + 4
+}
+
+metabolites_phylo_n <- transform_sample_counts(metabolites_phylo, function(x) x / sum(x))
+tax_table_metab      <- as.data.frame(tax_table(metabolites_phylo_n))
+tax_table_metab$NOSC <- vapply(tax_table_metab$KEGG_formula, calculate_nosc, numeric(1))
+tax_table(metabolites_phylo_n) <- as.matrix(tax_table_metab)
+tax_table(metabolites_phylo)   <- as.matrix(tax_table_metab)
+
+cat("Features with a usable NOSC:", sum(!is.na(tax_table_metab$NOSC)),
+    "of", nrow(tax_table_metab), "\n")
+
+rel_mat <- as(otu_table(metabolites_phylo_n), "matrix")
+if (!taxa_are_rows(metabolites_phylo_n)) rel_mat <- t(rel_mat)   # features x samples
+nosc_vec <- tax_table_metab$NOSC[match(rownames(rel_mat), rownames(tax_table_metab))]
+usable   <- !is.na(nosc_vec)
+if (!any(usable))
+  stop("No metabolite feature has a usable NOSC. Check that KEGG_formula is ",
+       "populated and that tax_table rownames match the otu_table.")
+sample_nosc <- colSums(rel_mat[usable, , drop = FALSE] * nosc_vec[usable])
+cat(sprintf("NOSC: %d of %d features usable, covering %.1f%% of relative abundance\n",
+            sum(usable), length(usable),
+            100 * mean(colSums(rel_mat[usable, , drop = FALSE]))))
+
+sample_df <- data.frame(sample_data(metabolites_phylo_n))
+sample_df <- sample_df[, !grepl("^NOSC", names(sample_df)), drop = FALSE]
+sample_df$NOSC <- unname(sample_nosc[rownames(sample_df)])
+if (all(is.na(sample_df$NOSC)))
+  stop("NOSC did not map onto the samples. sample_data rownames are: ",
+       paste(head(rownames(sample_df), 3), collapse = ", "),
+       "; otu_table sample names are: ",
+       paste(head(colnames(rel_mat), 3), collapse = ", "))
+sample_data(metabolites_phylo_n) <- sample_df
+sample_data(metabolites_phylo)   <- sample_df
+
+# ------------------------------------------------------------------------------
+# 2.8b  NOSC restricted to Level 1-3 annotations
+# ------------------------------------------------------------------------------
+
+# Levels 1-3: features with at least a computational structure proposal.
+# Excluded: L4 (formula only, no name) and unannotated features.
+HIGH_CONF       <- "^L1$|^L2$|^L3$"
+HIGH_CONF_LABEL <- "Level 1-3"
+
+conf_vec <- tax_table_metab$Annotation_Confidence[
+  match(rownames(rel_mat), rownames(tax_table_metab))]
+conf_lab <- ifelse(is.na(conf_vec) | conf_vec %in% c("", "NA"), "unannotated", conf_vec)
+
+nosc_by_conf <- data.frame(
+    Annotation_Confidence = conf_lab,
+    has_formula           = usable,
+    rel_abundance         = rowMeans(rel_mat)) |>
+  dplyr::group_by(Annotation_Confidence) |>
+  dplyr::summarise(n_features        = dplyr::n(),
+                   n_with_NOSC       = sum(has_formula),
+                   pct_with_NOSC     = round(100 * mean(has_formula), 1),
+                   mean_rel_abund    = signif(sum(rel_abundance), 3),
+                   .groups = "drop") |>
+  dplyr::arrange(dplyr::desc(n_with_NOSC))
+cat("\n=== NOSC coverage by annotation confidence ===\n")
+print(as.data.frame(nosc_by_conf))
+
+high <- usable & grepl(HIGH_CONF, conf_lab)
+cat(sprintf("NOSC features at %s: %d of %d usable (%.1f%%)\n",
+            HIGH_CONF_LABEL, sum(high), sum(usable), 100 * sum(high) / sum(usable)))
+
+if (sum(high) >= 5) {
+  sample_nosc_high <- colSums(rel_mat[high, , drop = FALSE] * nosc_vec[high])
+  wt_high <- colSums(rel_mat[high, , drop = FALSE])
+  sample_nosc_high_norm <- sample_nosc_high / wt_high
+
+  sens <- data.frame(
+    Sample          = names(sample_nosc),
+    NOSC_all        = as.numeric(sample_nosc),
+    NOSC_L1L3       = as.numeric(sample_nosc_high[names(sample_nosc)]),
+    NOSC_L1L3_norm  = as.numeric(sample_nosc_high_norm[names(sample_nosc)]))
+  r_raw  <- cor(sens$NOSC_all, sens$NOSC_L1L3,      use = "complete.obs")
+  r_norm <- cor(sens$NOSC_all, sens$NOSC_L1L3_norm, use = "complete.obs")
+  cat(sprintf("Sample NOSC, all formulae vs Level 1-3 only: r = %.3f (raw), %.3f (renormalised)\n",
+              r_raw, r_norm))
+
+  sens_dat <- sample_df
+  sens_dat$NOSC_L1L3 <- sens$NOSC_L1L3_norm[match(rownames(sens_dat), sens$Sample)]
+  sens_fit <- try(glmmTMB::glmmTMB(NOSC_L1L3 ~ Temp_avg_top + WT_drawdown_cm,
+                                   data = sens_dat), silent = TRUE)
+  if (!inherits(sens_fit, "try-error")) {
+    cat("\n--- NOSC (Level 1-3 only) ~ Temp + WT ---\n")
+    print(tidy_glmmtmb(sens_fit, "Sample NOSC (Level 1-3 annotations only)"))
+    register_model(tidy_glmmtmb(sens_fit, "Sample NOSC (Level 1-3 annotations only)"))
+  }
+} else {
+  message("Fewer than 5 NOSC features at Level 1-3; sensitivity analysis skipped.")
+}
+
+write_out(sample_df, p_meta("metadata_with_NOSC.csv"))
+saveRDS(metabolites_phylo, p_ps("PhyloseqObj_metabolites_withNOSC.RDS"))
+
+nosc_data <- sample_df |> mutate(Plot = as.factor(Plot))
+nosc <- lrt_interaction(
+  NOSC ~ Temp_avg_top + WT_drawdown_cm + Temp_avg_top:WT_drawdown_cm + (1|Plot),
+  NOSC ~ Temp_avg_top + WT_drawdown_cm + (1|Plot),
+  nosc_data, label = "NOSC")
+nosc_fix  <- drop_singular_re(nosc$model, nosc_data, "NOSC")
+step_nosc <- nosc_fix$model
+register_model(tidy_glmmtmb(step_nosc,
+  paste0("Sample NOSC", if (nosc_fix$dropped_re) " (enclosure RE dropped, singular)" else "")))
+print(tidy_glmmtmb(step_nosc, "Sample NOSC"))
+```
+
+## 2.9 MAASLIN2: METABOLITE RESPONSES
+
+Primary model: both predictors in one Maaslin2 fit with the enclosure random
+effect, `Temp_avg_top + WT_drawdown_cm + (1|Plot)`. Supplementary Data 3 and 4,
+the FDR summary and the class-level tests come from this fit. The two
+single-predictor fixed-effects fits are a sensitivity check.
+
+```{r maaslin-metabolites}
+
+# ------------------------------------------------------------------------------
+# 2.9.1  Feature table and annotations
+# ------------------------------------------------------------------------------
+
+ps_met  <- read_metab_ps(quiet = TRUE)
+keep    <- taxa_sums(ps_met) > 0
+if (any(!keep)) ps_met <- prune_taxa(keep, ps_met)
+cat("Metabolite features tested:", ntaxa(ps_met), "\n")
+
+taxdf_met <- data.frame(tax_table(ps_met))
+taxdf_met$feature <- rownames(taxdf_met)
+
+# Mode, retention time and precursor m/z out of the feature ID; every compound
+# name labelled with how many features carry it. The diastereomer alias and the
+# "M" sentinel were handled in read_metab_ps(), so they are not repeated here.
+taxdf_met <- cbind(taxdf_met, parse_feature_id(taxdf_met$feature))
+taxdf_met <- add_name_multiplicity(taxdf_met)
+
+print(as.data.frame(METAB_MSI_CENSUS), row.names = FALSE)
+
+# --- Compound Discoverer per-feature values -----------------------------------
+# Supplied as a keyed CSV in 00_inputs/ and left-joined at the point of use.
+annot_path <- p_raw(METAB_ANNOT_UPDATE_FILE)
+if (file.exists(annot_path)) {
+  annot_upd <- readr::read_csv(annot_path, show_col_types = FALSE)
+  stopifnot("feature" %in% names(annot_upd))
+
+
+  if ("Area_CV_percent_CD" %in% names(annot_upd)) {
+    taxdf_met <- dplyr::left_join(
+      taxdf_met, annot_upd[, c("feature", "Area_CV_percent_CD")], by = "feature")
+    taxdf_met$Area_CV_percent    <- round(taxdf_met$Area_CV_percent_CD, 1)
+    taxdf_met$Area_CV_percent_CD <- NULL
+    cov_n <- sum(!is.na(taxdf_met$Area_CV_percent))
+    cat(sprintf("Area CV%%: supplied for %d of %d features (%.1f%%)\n",
+                cov_n, nrow(taxdf_met), 100 * cov_n / nrow(taxdf_met)))
+    if (cov_n < nrow(taxdf_met))
+      message("  Area CV% is partial. The published CV figure and by-level table ",
+              "must state their denominator, or wait for the full CD export.")
+  }
+} else {
+  message(METAB_ANNOT_UPDATE_FILE, " not in 00_inputs/. Supplementary Data 3 and 4 ",
+          "will be written without Area_CV_percent.")
+}
+
+met_tax_cols <- c("feature", "Acquisition_mode", "RT_min", "precursor_mz",
+                  "Final_name", "Name_n_features", "Name_status",
+                  "Kingdom", "Superclass", "Class", "Subclass",
+                  "Parent.Level.1", "Parent.Level.2", "Parent.Level.3",
+                  "Parent.Level.4", "Parent.Level.5", "Annotation_Confidence")
+if ("Area_CV_percent" %in% names(taxdf_met))
+  met_tax_cols <- c(met_tax_cols, "Area_CV_percent")
+
+cat(sprintf("Acquisition modes present: %s\n",
+            paste(sort(unique(na.omit(taxdf_met$Acquisition_mode))), collapse = ", ")))
+
+# Census of compound names carried by more than one feature.
+dup_names <- taxdf_met |>
+  dplyr::filter(!is.na(Name_n_features), Name_n_features > 1) |>
+  dplyr::select(Final_name, feature, Acquisition_mode, RT_min, precursor_mz,
+                Annotation_Confidence, Name_n_features) |>
+  dplyr::arrange(dplyr::desc(Name_n_features), Final_name, RT_min)
+# The Supplementary Methods quote this count. The denominator is every feature in
+# the table, not the significant subset; the unnamed sentinel is already NA here.
+cat(sprintf(paste0("Compound names carried by >1 feature: %d names, %d features ",
+                   "(max %d per name), out of %d named features and %d features total\n"),
+            dplyr::n_distinct(dup_names$Final_name), nrow(dup_names),
+            if (nrow(dup_names)) max(dup_names$Name_n_features) else 0L,
+            sum(!is.na(taxdf_met$Final_name)), nrow(taxdf_met)))
+
+# ------------------------------------------------------------------------------
+# 2.9.1b  Normalisation identity check
+# ------------------------------------------------------------------------------
+
+stored_mat <- as(otu_table(ps_met), "matrix")
+if (!taxa_are_rows(ps_met)) stored_mat <- t(stored_mat)
+cat(sprintf("Stored intensities: %d features x %d samples, range %.4g to %.4g, %d zeros\n",
+            nrow(stored_mat), ncol(stored_mat), min(stored_mat), max(stored_mat),
+            sum(stored_mat == 0)))
+cat("  No zeros and a", sprintf("%.1f", max(stored_mat) / min(stored_mat)),
+    "fold total range: these are log2 values, not peak areas.\n")
+
+raw_auc_path <- p_raw(RAW_AUC_FILE)
+if (!file.exists(raw_auc_path))
+  stop("A feature-wise coefficient of variation requires the raw peak areas. ",
+       "The stored intensities are log2 values and a CV computed on them is ",
+       "meaningless. Copy ", RAW_AUC_FILE, " into 00_inputs/ and re-knit, or ",
+       "delete this block and the CV panel from the manuscript.")
+
+# The first column of raw_auc_table.csv holds the feature IDs and has no header.
+# Take it positionally.
+raw_tbl <- readr::read_csv(raw_auc_path, show_col_types = FALSE)
+raw_auc <- as.matrix(as.data.frame(raw_tbl)[, -1, drop = FALSE])
+rownames(raw_auc) <- as.character(raw_tbl[[1]])
+storage.mode(raw_auc) <- "double"
+cat(sprintf("  Raw AUC table: %d features x %d samples, range %.4g to %.4g, %d zeros\n",
+            nrow(raw_auc), ncol(raw_auc), min(raw_auc), max(raw_auc),
+            sum(raw_auc == 0)))
+
+# Check that the stored intensities equal log2(2 * M * x / m_j).
+shared_f <- intersect(rownames(raw_auc), rownames(stored_mat))
+shared_s <- intersect(colnames(raw_auc), colnames(stored_mat))
+if (length(shared_f) < 100 || length(shared_s) < 20)
+  stop("Only ", length(shared_f), " feature(s) and ", length(shared_s),
+       " sample(s) are shared between ", RAW_AUC_FILE, " and ", METAB_PS_FILE,
+       ". Check the identifier conventions on both. Stored sample names are: ",
+       paste(utils::head(colnames(stored_mat), 3), collapse = ", "),
+       "; raw table sample names are: ",
+       paste(utils::head(colnames(raw_auc), 3), collapse = ", "), ".")
+m_j  <- colMeans(raw_auc)
+M    <- mean(m_j)
+recon <- log2(2 * M * sweep(raw_auc[shared_f, shared_s, drop = FALSE], 2,
+                            m_j[shared_s], "/"))
+norm_err <- max(abs(recon - stored_mat[shared_f, shared_s, drop = FALSE]))
+cat(sprintf("  Mean-normalisation check on %d x %d shared cells: max |error| = %.3g\n",
+            length(shared_f), length(shared_s), norm_err))
+if (norm_err > 1e-6)
+  warning("The stored intensities are not log2(2 * M * x / m_j) to within 1e-6. ",
+          "The Methods description of the normalisation is wrong; max error ",
+          signif(norm_err, 4), ".")
+
+
+# ------------------------------------------------------------------------------
+# 2.9.2  Molecular weight from the KEGG formula
+# ------------------------------------------------------------------------------
+
+ATOMIC_MASS <- c(C = 12.000, H = 1.00783, N = 14.00307, O = 15.99491,
+                 P = 30.97376, S = 31.97207, Cl = 34.96885, Br = 78.91834,
+                 F = 18.99840, I = 126.90447, Na = 22.98977, K = 38.96371)
+
+calculate_mw <- function(formula) {
+  if (is.na(formula) || formula == "") return(NA_real_)
+  el <- stringr::str_match_all(formula, "([A-Z][a-z]*)(\\d*)")[[1]]
+  if (nrow(el) == 0) return(NA_real_)
+  n <- as.numeric(el[, 3]); n[is.na(n)] <- 1
+  if (any(!el[, 2] %in% names(ATOMIC_MASS))) return(NA_real_)
+  sum(ATOMIC_MASS[el[, 2]] * n)
+}
+taxdf_met$MW <- vapply(taxdf_met$KEGG_formula, calculate_mw, numeric(1))
+
+# ------------------------------------------------------------------------------
+# 2.9.2b  Phenolic pool split by aromatic ring count
+# ------------------------------------------------------------------------------
+
+PHENOLIC_SINGLE_RING <- c(
+  "Benzene and substituted derivatives",
+  "Phenols",
+  "Phenol ethers",
+  "Cinnamic acids and derivatives",
+  "Cinnamaldehydes",
+  "Benzaldehydes",
+  "Benzoic acids and derivatives",
+  "Phenylpropanoic acids",
+  "Anisoles",
+  "Benzenesulfonic acids and derivatives",
+  "Toluenes",
+  "Phenylacetic acids")
+
+PHENOLIC_MULTI_RING <- c(
+  "Flavonoids",
+  "Isoflavonoids",
+  "2-arylbenzofuran flavonoids",
+  "Neoflavonoids",
+  "Stilbenes",
+  "Naphthalenes",
+  "Naphthofurans",
+  "Coumarins and derivatives",
+  "Isocoumarins and derivatives",
+  "Benzopyrans",
+  "Benzofurans",
+  "Linear 1,3-diarylpropanoids",
+  "Diarylheptanoids",
+  "Anthracenes",
+  "Anthracyclines",
+  "Xanthones",
+  "Depsides and depsidones",
+  "Tannins",
+  "Indanes",
+  "Fluorenes",
+  "Biphenyls and derivatives")
+
+taxdf_met$Ring_class <- dplyr::case_when(
+  taxdf_met$Superclass == "Lignans, neolignans and related compounds" ~ "Multi-ring",
+  taxdf_met$Class %in% PHENOLIC_MULTI_RING                            ~ "Multi-ring",
+  taxdf_met$Class %in% PHENOLIC_SINGLE_RING                           ~ "Single-ring",
+  TRUE                                                                ~ NA_character_)
+
+taxdf_met$Poly_struct_set <- ifelse(
+  taxdf_met$Superclass %in% POLY_SUPERCLASSES & !is.na(taxdf_met$Ring_class),
+  paste("Phenolic -", taxdf_met$Ring_class), NA_character_)
+
+# Free amino acids separated from peptides. ClassyFire puts both under the class
+# "Carboxylic acids and derivatives" and the subclass "Amino acids, peptides, and
+# analogues", so a test at class level mixes them. Parent.Level.1 splits them.
+# Every other feature is the background, so "Amino acids" is tested against the
+# rest of the metabolome rather than against peptides alone.
+if (!"Parent.Level.1" %in% names(taxdf_met))
+  stop("taxdf_met has no Parent.Level.1 column, so free amino acids cannot be ",
+       "separated from peptides. Columns present: ",
+       paste(names(taxdf_met), collapse = ", "))
+taxdf_met$AA_set <- dplyr::case_when(
+  taxdf_met$Parent.Level.1 %in% "Amino acids and derivatives" ~ "Amino acids",
+  taxdf_met$Parent.Level.1 %in% "Peptides"                    ~ "Peptides",
+  TRUE                                                        ~ "Rest of metabolome")
+
+cat("\n=== Amino acid set composition ===\n")
+print(taxdf_met |>
+  dplyr::filter(AA_set != "Rest of metabolome") |>
+  dplyr::count(AA_set, Class, Subclass, Parent.Level.2, name = "n_features") |>
+  dplyr::arrange(AA_set, dplyr::desc(n_features)) |>
+  as.data.frame(), row.names = FALSE)
+cat("Features: amino acids", sum(taxdf_met$AA_set == "Amino acids"),
+    "| peptides", sum(taxdf_met$AA_set == "Peptides"),
+    "| background", sum(taxdf_met$AA_set == "Rest of metabolome"), "\n")
+
+# Carbohydrates. Figure 5 enriches glycolysis, carbon metabolism and pyruvate
+# metabolism, and every WS-OX path to a methanogen in Figure 3 runs through a
+# carbohydrate. The ClassyFire class "Organooxygen compounds" is a poor proxy
+# because it also holds alcohols, polyols and carbonyls, so the set is taken at
+# subclass level.
+if (!"Subclass" %in% names(taxdf_met))
+  stop("taxdf_met has no Subclass column; the carbohydrate set cannot be built.")
+taxdf_met$Carb_set <- ifelse(
+  taxdf_met$Subclass %in% "Carbohydrates and carbohydrate conjugates",
+  "Carbohydrates", "Rest of metabolome")
+
+cat("\n=== Carbohydrate set ===\n")
+cat("Features: carbohydrates", sum(taxdf_met$Carb_set == "Carbohydrates"),
+    "| background", sum(taxdf_met$Carb_set == "Rest of metabolome"), "\n")
+if (sum(taxdf_met$Carb_set == "Carbohydrates") < 8) {
+  message("Fewer than 8 carbohydrate features. The competitive test is reported ",
+          "but should not be interpreted.")
+} else {
+  print(taxdf_met |>
+    dplyr::filter(Carb_set == "Carbohydrates") |>
+    dplyr::count(Class, Subclass, Annotation_Confidence, name = "n_features") |>
+    dplyr::arrange(dplyr::desc(n_features)) |>
+    as.data.frame(), row.names = FALSE)
+}
+
+poly_all <- dplyr::filter(taxdf_met, Superclass %in% POLY_SUPERCLASSES)
+unassigned <- sort(unique(poly_all$Class[is.na(poly_all$Ring_class)]))
+if (length(unassigned))
+  message("Phenolic Classes with no ring assignment (",
+          sum(is.na(poly_all$Ring_class)), " features): ",
+          paste(unassigned, collapse = "; "),
+          ". Add each to PHENOLIC_SINGLE_RING or PHENOLIC_MULTI_RING.")
+
+ring_summary <- poly_all |>
+  dplyr::mutate(Ring_class = ifelse(is.na(Ring_class), "Unassigned", Ring_class)) |>
+  dplyr::group_by(Ring_class) |>
+  dplyr::summarise(n_features = dplyr::n(),
+                   n_classes  = dplyr::n_distinct(Class),
+                   median_MW  = round(median(MW, na.rm = TRUE), 1),
+                   q25_MW     = round(quantile(MW, .25, na.rm = TRUE), 1),
+                   q75_MW     = round(quantile(MW, .75, na.rm = TRUE), 1),
+                   .groups    = "drop")
+cat("\n=== Phenolic pool, structural split ===\n")
+print(as.data.frame(ring_summary))
+
+# ------------------------------------------------------------------------------
+# 2.9.3  Primary model
+# ------------------------------------------------------------------------------
+
+if (REFIT_MAASLIN) {
+  fit_maaslin(ps_met, "MaAslin_metab_multi",
+              fixed = c("Temp_avg_top", "WT_drawdown_cm"), random = "Plot",
+              transform = "NONE")
+}
+MaAslin_metab_multi <- readRDS(maaslin_path("MaAslin_metab_multi.rds"))
+stopifnot(all(c("Temp_avg_top", "WT_drawdown_cm") %in%
+              MaAslin_metab_multi$results$metadata))
+
+# ------------------------------------------------------------------------------
+# 2.9.4  Supplementary Data 3 and 4
+# ------------------------------------------------------------------------------
+
+build_suppl_metab <- function(res, predictor_name, tag) {
+  res$results |>
+    dplyr::rename(feature = 1) |>
+    dplyr::filter(metadata == predictor_name, pval < 0.05) |>
+    add_effect_size() |>
+    dplyr::mutate(metadata = tag) |>
+    dplyr::left_join(taxdf_met[, c(met_tax_cols, "MW", "Ring_class")], by = "feature") |>
+    dplyr::select(feature, Acquisition_mode, RT_min, precursor_mz,
+                  metadata, coef, stderr, CI_lower, CI_upper, pval, qval,
+                  evidence, N, dplyr::any_of(c("N.not.zero", "N.not.0")),
+                  Final_name, Name_n_features, Name_status,
+                  Kingdom, Superclass, Class, Subclass,
+                  dplyr::starts_with("Parent.Level"), Annotation_Confidence,
+                  dplyr::any_of("Area_CV_percent"), MW, Ring_class) |>
+    dplyr::arrange(coef)
+}
+
+# Column definitions carried alongside Supplementary Data 3 and 4. Acquisition
+# mode, retention time and precursor m/z are explicit columns rather than being
+# encoded only in the feature ID, so repeated compound names can be assessed as
+# isomers, adducts or duplicates.
+SD34_HEADER_NOTE <- data.frame(column = c(
+  "feature", "Acquisition_mode", "RT_min", "precursor_mz",
+  "Final_name", "Name_n_features", "Name_status", "Annotation_Confidence",
+  "Area_CV_percent"),
+  definition = c(
+    "Feature identifier, '<acquisition mode>_<retention time in min>_<precursor m/z>'.",
+    "Chromatographic method and polarity the feature was detected in.",
+    "Chromatographic retention time, minutes.",
+    "Precursor m/z.",
+    paste("Putative compound name. A name is an assignment, not an identification,",
+          "unless Annotation_Confidence is L1. Stereoisomeric assignments that",
+          "in-silico methods cannot separate are reported once, without a",
+          "stereodescriptor."),
+    "Number of features in the full table carrying this same compound name.",
+    paste("Whether the name is unique to this feature, shared with others, or the",
+          "feature is unnamed. Features sharing a name are not replicates; compare",
+          "RT_min and precursor_mz to judge whether they are isomers or adducts."),
+    paste("Metabolomics Standards Initiative level. L1, match to an authentic",
+          "standard on precursor m/z (5 ppm), MS/MS spectrum and retention time",
+          "(within 0.5 min), standards run on the same instrument, column and",
+          "method as the samples. L2, full MS/MS match to mzCloud. L3, structure",
+          "proposed computationally from predicted formula and compound class",
+          "(SIRIUS, CSI:FingerID, CANOPUS, ClassyFire, ChemSpider). L4, molecular",
+          "formula only, no putative name. L3 and L4 names are the best-matching",
+          "candidate structure, not an identification."),
+    paste("Compound Discoverer coefficient of variation of peak area for this",
+          "compound across the sample set. This is dispersion across biological",
+          "samples spanning a 0 to 9 degrees C warming gradient, three",
+          "water-table regimes and three years, and is expected to be large for",
+          "responsive features. It is not the pooled-QC relative standard",
+          "deviation: the <30% QC RSD and <=25% correction-factor thresholds",
+          "reported in the Supplementary Methods were applied to replicate",
+          "injections of the pooled QC extract, which is a different quantity."))
+)
+# The definition list must match the columns actually written, or a reader will
+# look for a column that is not there.
+if (!"Area_CV_percent" %in% names(taxdf_met))
+  SD34_HEADER_NOTE <- SD34_HEADER_NOTE[SD34_HEADER_NOTE$column != "Area_CV_percent", ]
+write_out(SD34_HEADER_NOTE, p_sd("Suppl_Data_03_04_column_definitions.csv"))
+
+Suppl_Data_03 <- build_suppl_metab(MaAslin_metab_multi, "WT_drawdown_cm", "WT_drawdown")
+Suppl_Data_04 <- build_suppl_metab(MaAslin_metab_multi, "Temp_avg_top",   "Temp_avg_top")
+write_out(Suppl_Data_03, p_sd("Suppl_Data_03_metabolites_WT.csv"))
+write_out(Suppl_Data_04, p_sd("Suppl_Data_04_metabolites_temp.csv"))
+
+# ------------------------------------------------------------------------------
+# 2.9.5  Class-level competitive test
+# ------------------------------------------------------------------------------
+
+class_level_competitive <- function(res, predictor_name, label, tax,
+                                    level = "Superclass", min_n = 5) {
+  df <- res$results |>
+    dplyr::rename(feature = 1) |>
+    dplyr::filter(metadata == predictor_name) |>
+    dplyr::left_join(tax[, c("feature", level)], by = "feature") |>
+    dplyr::filter(!is.na(.data[[level]]), .data[[level]] != "")
+
+  df |>
+    dplyr::group_by(set = .data[[level]]) |>
+    dplyr::filter(dplyr::n() >= min_n) |>
+    dplyr::group_modify(~{
+      inset  <- .x
+      outset <- dplyr::filter(df, .data[[level]] != .y$set[1])
+      p_bg   <- mean(outset$coef > 0)
+      data.frame(
+        n_features  = nrow(inset),
+        n_increase  = sum(inset$coef > 0),
+        n_decrease  = sum(inset$coef < 0),
+        median_coef = median(inset$coef),
+        median_coef_background = median(outset$coef),
+        p_KS     = suppressWarnings(ks.test(inset$pval, "punif")$p.value),
+        p_wilcox = suppressWarnings(wilcox.test(inset$coef, outset$coef)$p.value),
+        p_sign   = if (p_bg > 0 && p_bg < 1)
+                     binom.test(sum(inset$coef > 0), nrow(inset), p = p_bg)$p.value
+                   else NA_real_)
+    }) |>
+    dplyr::ungroup() |>
+    dplyr::mutate(predictor = label, level = level,
+                  q_KS     = p.adjust(p_KS,     method = "BH"),
+                  q_wilcox = p.adjust(p_wilcox, method = "BH"),
+                  q_sign   = p.adjust(p_sign,   method = "BH")) |>
+    dplyr::arrange(p_wilcox)
+}
+
+class_comp <- purrr::pmap_dfr(
+  list(pred  = c("WT_drawdown_cm", "Temp_avg_top", "WT_drawdown_cm", "Temp_avg_top"),
+       lab   = c("WT_drawdown", "Temp_avg_top", "WT_drawdown", "Temp_avg_top"),
+       lev   = c("Superclass", "Superclass", "Class", "Class"),
+       min_n = c(5, 5, 8, 8)),
+  function(pred, lab, lev, min_n)
+    class_level_competitive(MaAslin_metab_multi, pred, lab, taxdf_met, lev, min_n))
+print(as.data.frame(class_comp), digits = 3)
+
+# Single-ring versus multi-ring phenolics, each set the other's background.
+class_comp_struct <- dplyr::bind_rows(
+  class_level_competitive(MaAslin_metab_multi, "WT_drawdown_cm", "WT_drawdown",
+                          taxdf_met, "Poly_struct_set"),
+  class_level_competitive(MaAslin_metab_multi, "Temp_avg_top", "Temp_avg_top",
+                          taxdf_met, "Poly_struct_set"))
+print(as.data.frame(class_comp_struct), digits = 3)
+
+# Free amino acids and peptides, each tested against everything else.
+class_comp_AA <- dplyr::bind_rows(
+  class_level_competitive(MaAslin_metab_multi, "WT_drawdown_cm", "WT_drawdown",
+                          taxdf_met, "AA_set"),
+  class_level_competitive(MaAslin_metab_multi, "Temp_avg_top", "Temp_avg_top",
+                          taxdf_met, "AA_set")) |>
+  dplyr::filter(set != "Rest of metabolome")
+print(as.data.frame(class_comp_AA), digits = 3)
+
+# Carbohydrates against the rest of the metabolome.
+class_comp_carb <- dplyr::bind_rows(
+  class_level_competitive(MaAslin_metab_multi, "WT_drawdown_cm", "WT_drawdown",
+                          taxdf_met, "Carb_set"),
+  class_level_competitive(MaAslin_metab_multi, "Temp_avg_top", "Temp_avg_top",
+                          taxdf_met, "Carb_set")) |>
+  dplyr::filter(set != "Rest of metabolome")
+print(as.data.frame(class_comp_carb), digits = 3)
+
+# Supplementary Data 5: ClassyFire superclass and class tests plus the
+# phenolic ring-count split, in one sheet.
+write_out(
+  dplyr::bind_rows(class_comp, class_comp_struct, class_comp_AA, class_comp_carb) |>
+    dplyr::transmute(
+      compound_set           = set,
+      grouping               = dplyr::recode(level,
+                                 Poly_struct_set = "Phenolic ring count",
+                                 AA_set          = "Amino acid vs peptide",
+                                 Carb_set        = "Carbohydrates",
+                                 .default = level),
+      predictor              = predictor,
+      n_features             = n_features,
+      n_increase             = n_increase,
+      n_decrease             = n_decrease,
+      median_coef            = median_coef,
+      median_coef_background = median_coef_background,
+      p_KS = p_KS, q_KS = q_KS,
+      p_wilcox = p_wilcox, q_wilcox = q_wilcox,
+      p_sign = p_sign, q_sign = q_sign) |>
+    dplyr::arrange(grouping, predictor, q_wilcox),
+  p_sd("Suppl_Data_05_classlevel_competitive.csv"))
+
+# ------------------------------------------------------------------------------
+# 2.9.6  Class-level test on class mean intensity, with the enclosure random effect
+# ------------------------------------------------------------------------------
+
+class_intensity <- {
+  met_df   <- sample_matrix(ps_met)
+  met_norm <- met_df / rowMeans(met_df, na.rm = TRUE)
+  met_norm$SampleID <- rownames(met_norm)
+  met_norm
+} |>
+  dplyr::left_join(
+    data.frame(sample_data(ps_met)) |>
+      dplyr::select(SampleID = Sample, Temp_avg_top, WT_drawdown_cm, Plot, Year),
+    by = "SampleID") |>
+  tidyr::pivot_longer(cols = -c(SampleID, Temp_avg_top, WT_drawdown_cm, Plot, Year),
+                      names_to = "feature", values_to = "NormalizedIntensity") |>
+  dplyr::inner_join(taxdf_met[, c("feature", "Superclass", "Class",
+                                  "Poly_struct_set", "AA_set", "Carb_set")],
+                    by = "feature")
+
+fit_class_model <- function(dat, set_col) {
+  dat |>
+    dplyr::filter(!is.na(.data[[set_col]]), .data[[set_col]] != "") |>
+    dplyr::group_by(SampleID, Temp_avg_top, WT_drawdown_cm, Plot, Year,
+                    set = .data[[set_col]]) |>
+    dplyr::summarise(MeanIntensity = mean(NormalizedIntensity, na.rm = TRUE),
+                     n_features = dplyr::n(), .groups = "drop") |>
+    dplyr::filter(n_features >= 5) |>
+    dplyr::group_by(set) |>
+    dplyr::group_modify(~{
+      d <- .x
+      # Predictors are standardised for conditioning and the slopes divided back
+      # by the standard deviations, so coefficients stay on the per-unit scale.
+      sd_t <- stats::sd(d$Temp_avg_top)
+      sd_w <- stats::sd(d$WT_drawdown_cm)
+      d$Temp_z <- as.numeric(scale(d$Temp_avg_top))
+      d$WT_z   <- as.numeric(scale(d$WT_drawdown_cm))
+
+      usable <- function(m) {
+        if (inherits(m, "try-error") || is.null(m)) return(FALSE)
+        cf <- try(summary(m)$coefficients$cond, silent = TRUE)
+        !inherits(cf, "try-error") && all(c("Temp_z", "WT_z") %in% rownames(cf)) &&
+          !any(is.nan(cf[, "Std. Error"])) && !any(is.na(cf[, "Std. Error"]))
+      }
+
+      m <- try(glmmTMB(MeanIntensity ~ Temp_z + WT_z + (1 | Plot), data = d),
+               silent = TRUE)
+      fit_type <- "mixed, scaled predictors"
+
+      if (!usable(m)) {
+        m <- try(glmmTMB(MeanIntensity ~ Temp_z + WT_z + (1 | Plot), data = d,
+                         control = glmmTMBControl(optimizer = optim,
+                                                  optArgs = list(method = "BFGS"))),
+                 silent = TRUE)
+        fit_type <- "mixed, scaled, BFGS"
+      }
+      if (!usable(m)) {
+        m <- try(glmmTMB(MeanIntensity ~ Temp_z + WT_z, data = d), silent = TRUE)
+        fit_type <- "fixed effects only (enclosure RE not estimable)"
+      }
+      if (!usable(m)) return(data.frame())
+
+      cf  <- summary(m)$coefficients$cond
+      r2m <- suppressWarnings(try(r.squaredGLMM(m)[1, "R2m"], silent = TRUE))
+      data.frame(
+        n_features      = d$n_features[1],
+        coef_Temp       = cf["Temp_z", "Estimate"]   / sd_t,
+        se_Temp         = cf["Temp_z", "Std. Error"] / sd_t,
+        p_Temp          = cf["Temp_z", "Pr(>|z|)"],
+        coef_WT         = cf["WT_z",   "Estimate"]   / sd_w,
+        se_WT           = cf["WT_z",   "Std. Error"] / sd_w,
+        p_WT            = cf["WT_z",   "Pr(>|z|)"],
+        coef_Temp_perSD = cf["Temp_z", "Estimate"],
+        coef_WT_perSD   = cf["WT_z",   "Estimate"],
+        R2m             = if (inherits(r2m, "try-error")) NA_real_ else r2m,
+        fit_type        = fit_type,
+        converged       = TRUE)
+    }) |>
+    dplyr::ungroup() |>
+    dplyr::mutate(q_Temp = p.adjust(p_Temp, "BH"), q_WT = p.adjust(p_WT, "BH"))
+}
+
+class_selfcontained        <- fit_class_model(class_intensity, "Superclass")
+class_selfcontained_struct <- fit_class_model(class_intensity, "Poly_struct_set")
+class_selfcontained_AA     <- fit_class_model(class_intensity, "AA_set")
+class_selfcontained_carb   <- fit_class_model(class_intensity, "Carb_set")
+print(as.data.frame(class_selfcontained),        digits = 3)
+print(as.data.frame(class_selfcontained_struct), digits = 3)
+
+cat("\n=== Class-model fit types ===\n")
+print(table(class_selfcontained$fit_type))
+if (any(class_selfcontained$fit_type != "mixed, scaled predictors"))
+  message("Classes not fitted with the mixed model: ",
+          paste(class_selfcontained$set[
+            class_selfcontained$fit_type != "mixed, scaled predictors"],
+            collapse = ", "))
+n_missing <- dplyr::n_distinct(class_intensity$Superclass[
+  !is.na(class_intensity$Superclass) & class_intensity$Superclass != ""]) -
+  nrow(class_selfcontained)
+if (n_missing > 0)
+  warning(n_missing, " class model(s) still failed to fit and are absent from the table.")
+
+print(as.data.frame(class_selfcontained), digits = 3, row.names = FALSE)
+# class_selfcontained_struct is the class-mean model on the single-ring versus
+# multi-ring split. The manuscript reports the ring split only through the
+# competitive tests in Supplementary Data 5, so this fit stays in the session and
+# is not written out.
+print(as.data.frame(class_selfcontained_AA), digits = 3)
+print(as.data.frame(class_selfcontained_AA), digits = 3, row.names = FALSE)
+print(as.data.frame(class_selfcontained_carb), digits = 3)
+print(as.data.frame(class_selfcontained_carb), digits = 3, row.names = FALSE)
+
+# ------------------------------------------------------------------------------
+# 2.9.7  Sensitivity: single-predictor fixed-effects fits
+# ------------------------------------------------------------------------------
+
+if (REFIT_MAASLIN) {
+  fit_maaslin(ps_met, "MaAslinLM_metab_WT",   fixed = "WT_drawdown_cm", random = NULL,
+              transform = "NONE")
+  fit_maaslin(ps_met, "MaAslinLM_metab_temp", fixed = "Temp_avg_top",   random = NULL,
+              transform = "NONE")
+}
+MaAslinLM_metab_WT   <- readRDS(maaslin_path("MaAslinLM_metab_WT.rds"))
+MaAslinLM_metab_temp <- readRDS(maaslin_path("MaAslinLM_metab_temp.rds"))
+
+fdr_tbl <- dplyr::bind_rows(
+  fdr_summary(MaAslin_metab_multi,  "Primary: Temp + WT + (1|Plot)"),
+  fdr_summary(MaAslinLM_metab_WT,   "Sensitivity: WT only, fixed effects"),
+  fdr_summary(MaAslinLM_metab_temp, "Sensitivity: Temp only, fixed effects"))
+print(as.data.frame(fdr_tbl), digits = 3)
+
+print(dplyr::bind_rows(
+    class_level_competitive(MaAslinLM_metab_WT,   "WT_drawdown_cm", "WT_drawdown",
+                            taxdf_met, "Superclass"),
+    class_level_competitive(MaAslinLM_metab_temp, "Temp_avg_top",   "Temp_avg_top",
+                            taxdf_met, "Superclass")) |> as.data.frame(), digits = 3)
+```
+
+## 2.10 POREWATER GAS MODELS AND SUPPLEMENTARY FIGURE S2
+
+```{r porewater-gas-models-and-fig}
+
+CH4.pw <- read.csv(p_raw_req("CH4-Surface_Porewater_2017-2021.csv"))[
+  c("Year","Month","Plot","Depth","d13CH4","d13CO2","alpha","CH4mM","CO2mM","corrCO2CH4")]
+pw2022 <- read.csv(p_raw_req("sprucePorewater2022.csv"))[
+  c("year","month","site","depth","d13CH4","d13CO2","alpha","CH4mM","CO2mM","corrCO2CH4")]
+colnames(pw2022) <- colnames(CH4.pw)
+pw2022$Plot <- gsub("Plot(\\d+)", "P\\1", pw2022$Plot)
+
+PWgas <- rbind(CH4.pw, pw2022) |>
+  filter(grepl("P\\d+", Plot)) |>
+  mutate(Plot = as.integer(gsub("P0*(\\d+)", "\\1", Plot)), Year = as.factor(Year),
+         CH4mM = as.numeric(CH4mM), CO2mM = as.numeric(CO2mM)) |>
+  filter(Year %in% c("2020","2021","2022"), Depth < 50, Depth > 10) |>
+  group_by(Year, Plot, Depth) |>
+  summarise(CH4mM = mean(CH4mM, na.rm = TRUE), CO2mM = mean(CO2mM, na.rm = TRUE),
+            corrCO2CH4 = mean(corrCO2CH4, na.rm = TRUE), .groups = "drop") |>
+  left_join(sample_df |> dplyr::select(-any_of("Depth")) |>
+              mutate(Year = as.factor(Year), Plot = as.integer(as.character(Plot))),
+            by = c("Year", "Plot")) |>
+  mutate(CO2_CH4_ratio = CO2mM / CH4mM, Plot = as.factor(Plot))
+
+write_out(PWgas, p_meta("PW_gas_metadata.csv"))
+
+fit_pw <- function(response, label) {
+  cat(label, "Shapiro P =",
+      round(shapiro.test(na.omit(PWgas[[response]]))$p.value, 3), "\n")
+  f <- function(rhs) as.formula(paste(response, "~", rhs))
+  r <- lrt_interaction(f("Temp_avg_top * WT_drawdown_cm + (1|Plot)"),
+                       f("Temp_avg_top + WT_drawdown_cm + (1|Plot)"),
+                       PWgas, label = label)
+  fixed <- drop_singular_re(r$model, PWgas, label)
+  register_model(tidy_glmmtmb(fixed$model, label))
+  list(model = fixed$model, dropped_re = fixed$dropped_re, lrt_p = r$lrt_p)
+}
+res_ch4   <- fit_pw("CH4mM",         "Porewater CH4 (mM)")
+res_co2   <- fit_pw("CO2mM",         "Porewater CO2 (mM)")
+res_ratio <- fit_pw("CO2_CH4_ratio", "Porewater CO2:CH4 ratio")
+
+scatter_pw <- function(x, y, xlab, ylab, legend_pos) {
+  ggplot(PWgas, aes(x = .data[[x]], y = .data[[y]])) +
+    geom_point(aes(fill = Warming_Treatment.ord, shape = Year), colour = "black", size = 8) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed", linewidth = 1) +
+    scale_fill_manual(values = allGroupsColors) + scale_shape_manual(values = c(21,22,24)) +
+    guides(fill = guide_legend("Temperature\ntreatment", override.aes = list(shape = 21))) +
+    xlab(xlab) + ylab(ylab) + theme_bw() +
+    theme(legend.position = legend_pos, axis.text = element_text(size = 14),
+          axis.title = element_text(size = 16))
+}
+
+FIG_S2C <- interactions::interact_plot(
+    lm(CO2_CH4_ratio ~ Temp_avg_top * WT_drawdown_cm, data = PWgas),
+    pred = Temp_avg_top, modx = WT_drawdown_cm, plot.points = TRUE, point.size = 8,
+    y.label = "CO2:CH4 ratio", x.label = "Temperature (ºC, May-Aug)",
+    legend.main = "Water table drawdown (cm)") +
+  theme_bw() +
+  theme(legend.position = "right", axis.text = element_text(size = 14),
+        axis.title = element_text(size = 16))
+
+save_fig(ggarrange(
+    scatter_pw("Temp_avg_top",  "CO2mM", "Temperature (ºC, May-Aug)", "Pore water CO2 (mM)", "none"),
+    scatter_pw("WT_drawdown_cm","CH4mM", "Water table drawdown (cm)", "Pore water CH4 (mM)", "right"),
+    FIG_S2C, ncol = 3, labels = c("A","B","C"), font.label = list(size = 18)),
+  p_fig("Figure_S2_porewater_gas.pdf"), width = 18, height = 6)
+```
+
+## 3. dbRDA COMMUNITY ORDINATIONS — Figure 1, Supplementary Figures S4 and S9
+
+Condition on enclosure for repeated sampling, and on depth for the amplicons.
+Terms tested sequentially by permutation, 999 permutations, `by = "terms"`.
+Each permutation test runs once and the result is reused for the figure
+annotation and for Supplementary Data 7.
+
+```{r dbrda-run}
+
+DBRDA_PERM <- 999
+
+run_dbrda <- function(dis, sampledf, condition = "Condition(Plot)",
+                      label, expected_terms, seed = 1234) {
+  cond <- paste(condition, collapse = " + ")
+  f <- function(rhs) as.formula(paste("dis ~", rhs, "+", cond))
+
+  full     <- vegan::dbrda(f("Temp_avg_top + WT_drawdown_cm"), data = sampledf)
+  vif_full <- vif.cca(full)
+  cat("\n=== ", label, ": VIF, full model ===\n"); print(vif_full)
+
+  set.seed(seed)
+  a_temp <- anova(vegan::dbrda(f("Temp_avg_top"),   data = sampledf), permutations = DBRDA_PERM)
+  set.seed(seed)
+  a_wt   <- anova(vegan::dbrda(f("WT_drawdown_cm"), data = sampledf), permutations = DBRDA_PERM)
+  set.seed(seed)
+  a_int  <- anova(vegan::dbrda(f("Temp_avg_top * WT_drawdown_cm"), data = sampledf),
+                  by = "terms", permutations = DBRDA_PERM)
+
+  int_row <- grep(":", rownames(a_int))
+  p_int   <- if (length(int_row)) a_int$`Pr(>F)`[int_row[1]] else NA_real_
+  cat(label, ": Temp alone P =", a_temp$`Pr(>F)`[1],
+      "| WT alone P =", a_wt$`Pr(>F)`[1],
+      "| interaction P =", p_int, "\n")
+
+  chosen <- if (!is.na(p_int) && p_int < 0.05) {
+    "Temp_avg_top * WT_drawdown_cm"
+  } else {
+    keep <- c("Temp_avg_top", "WT_drawdown_cm")[
+      c(a_temp$`Pr(>F)`[1] < 0.05, a_wt$`Pr(>F)`[1] < 0.05)]
+    if (length(keep) == 0) "Temp_avg_top + WT_drawdown_cm" else paste(keep, collapse = " + ")
+  }
+  if (!identical(chosen, expected_terms))
+    message(label, ": selection gives '", chosen, "', expected '", expected_terms,
+            "'. The selected model is the one fitted and plotted.")
+
+  final <- vegan::dbrda(f(chosen), data = sampledf)
+  set.seed(seed)
+  a_final <- anova(final, permutations = DBRDA_PERM)
+  r2 <- RsquareAdj(final)
+
+  vif_sel <- vif.cca(final)
+  cat("=== ", label, ": VIF, selected model (", chosen, ") ===\n", sep = "")
+  print(vif_sel)
+  pred_in <- intersect(names(vif_sel), c("Temp_avg_top", "WT_drawdown_cm"))
+  if (any(vif_sel[pred_in] > 10, na.rm = TRUE))
+    warning(label, ": VIF > 10 in the selected model for ",
+            paste(pred_in[vif_sel[pred_in] > 10], collapse = ", "))
+
+  list(label = label, model = final, terms = chosen, selected = chosen,
+       submitted_terms = expected_terms,
+       vif = vif_sel, vif_full = vif_full,
+       anova = a_final, adj_R2 = r2$adj.r.squared,
+       n = nrow(sampledf), p_temp = a_temp$`Pr(>F)`[1], p_wt = a_wt$`Pr(>F)`[1],
+       p_interaction = p_int,
+       stat = paste0("R2adj=", round(r2$adj.r.squared, 3),
+                     ", F=", round(a_final$F[1], 2),
+                     ", ", if (a_final$`Pr(>F)`[1] < 0.001) "p<0.001"
+                           else paste0("p=", round(a_final$`Pr(>F)`[1], 3)),
+                     ", n=", nrow(sampledf)))
+}
+
+# axis2 is taken from the fitted model: a single-predictor model has one
+# constrained axis, so the second axis is MDS1.
+#
+# ARROW_FRAC controls biplot arrow length. vegan returns biplot scores on the
+# constrained-axis scale, which in some panels is much larger than the spread of
+# the site scores, so an unscaled arrow runs off the plot. Every arrow in a panel
+# is multiplied by one common factor chosen so the longest reaches ARROW_FRAC of
+# that panel's site-score range. Relative arrow lengths and all angles are
+# preserved within a panel; lengths are not comparable between panels, which is
+# already true of biplot scores.
+ARROW_FRAC <- 0.65
+
+dbrda_panel <- function(fit, sampledf, fill_var, axis1 = "dbRDA1", axis2 = NULL,
+                        arrow_labels, flip_x = FALSE, high, low,
+                        title = NULL, arrow_frac = ARROW_FRAC) {
+  site_axes <- colnames(scores(fit$model, display = "sites"))
+  if (is.null(axis2))
+    axis2 <- if (length(site_axes) > 1 && grepl("^dbRDA", site_axes[2])) site_axes[2] else "MDS1"
+  smry <- summary(fit$model)
+  prop <- smry$cont$importance["Proportion Explained", ]
+  d1   <- cbind(data.frame(scores(fit$model, display = "sites")),
+                Year = as.factor(sampledf$Year),
+                Temp_avg_top = sampledf$Temp_avg_top,
+                WT_drawdown_cm = sampledf$WT_drawdown_cm)
+  ARROW_LABELS <- c(Temp_avg_top = "Temp", WT_drawdown_cm = "Water table\ndrawdown")
+  d2 <- as.data.frame(scores(fit$model, display = "bp"))
+  d2 <- d2[rownames(d2) %in% names(ARROW_LABELS), , drop = FALSE]
+  if (!missing(arrow_labels) && length(arrow_labels) == nrow(d2)) {
+    rownames(d2) <- arrow_labels
+  } else {
+    rownames(d2) <- unname(ARROW_LABELS[rownames(d2)])
+  }
+
+  # Rescale the arrows. Half-range on each axis, so an arrow drawn from the
+  # origin at arrow_frac = 1 would just touch the edge of the site cloud.
+  half_x <- max(abs(range(d1[[axis1]], na.rm = TRUE)))
+  half_y <- max(abs(range(d1[[axis2]], na.rm = TRUE)))
+  reach  <- max(sqrt((d2[[axis1]] / half_x)^2 + (d2[[axis2]] / half_y)^2), na.rm = TRUE)
+  if (is.finite(reach) && reach > 0) {
+    k <- arrow_frac / reach
+    d2[[axis1]] <- d2[[axis1]] * k
+    d2[[axis2]] <- d2[[axis2]] * k
+  }
+
+  s <- if (flip_x) -1 else 1
+
+  ggplot(d1, aes(x = s * .data[[axis1]], y = .data[[axis2]])) +
+    geom_point(aes(fill = .data[[fill_var]], shape = Year), color = "black", size = 6) +
+    scale_shape_manual(values = c(21, 22, 24)) +
+    scale_fill_gradient(high = high, low = low) +
+    geom_hline(yintercept = 0, linetype = "dotted") +
+    geom_vline(xintercept = 0, linetype = "dotted") +
+    geom_segment(data = d2, aes(x = 0, xend = s * .data[[axis1]], y = 0, yend = .data[[axis2]]),
+                 color = "grey20", arrow = arrow(length = unit(0.01, "npc")), linewidth = 2) +
+    geom_text(data = d2, aes(x = s * .data[[axis1]], y = .data[[axis2]],
+                             label = rownames(d2),
+                             hjust = 0.5 * (1 - sign(s * .data[[axis1]])),
+                             vjust = 0.5 * (1 - sign(.data[[axis2]]))),
+              color = "grey20", size = 4.5, lineheight = 0.9) +
+    annotate("text", x = Inf, y = -Inf, label = fit$stat,
+             hjust = 1.05, vjust = -0.5, color = "grey40", size = 4) +
+    # Extra x expansion so the "Water table drawdown" label, which is drawn
+    # outward from the arrow tip, is not clipped at the panel edge.
+    scale_x_continuous(expand = expansion(mult = 0.14)) +
+    scale_y_continuous(expand = expansion(mult = 0.10)) +
+    labs(title = title) +
+    xlab(paste0(axis1, " (", round(prop[axis1] * 100, 1), "%)")) +
+    ylab(paste0(axis2, " (", round(prop[axis2] * 100, 1), "%)")) +
+    theme_bw() +
+    theme(legend.position = "none", axis.text = element_text(size = 16),
+          axis.title = element_text(size = 16),
+          plot.title = element_text(size = 20, hjust = 0.5,
+                                    margin = margin(b = 10)),
+          plot.margin = margin(t = 12, r = 8, b = 6, l = 8))
+}
+
+# --- Datasets ------------------------------------------------------------------
+
+peat16S.phy.RA <- readRDS(p_raw_req("peat16S_phy.rds")) |>
+  transform_sample_counts(function(x) x / sum(x)) |>
+  subset_samples(!is.na(Warming))
+peatITS.phy.RA <- readRDS(p_raw_req("peatITS.phy.rds")) |>
+  transform_sample_counts(function(x) x / sum(x)) |>
+  subset_samples(!is.na(Warming))
+metabolites.phy.RA <- transform_sample_counts(metabolites_phylo, function(x) x / sum(x))
+droughtMAG.ps          <- readRDS(p_raw_req(MAG_ABUNDANCE_RDS))
+droughtMAG.activity.ps <- readRDS(p_raw_req(MAG_ACTIVITY_RDS))
+
+# Derive WT_drawdown_cm where it is missing and join the remaining model
+# predictors from the canonical metadata on Year + Plot.
+repair_mag_metadata <- function(ps, label) {
+  sd_now  <- data.frame(sample_data(ps), check.names = FALSE)
+  keep_rn <- rownames(sd_now)
+  needed  <- c("WT_drawdown_cm", "AvgTemp10cm", "Temp_avg_top", "NOSC")
+  before  <- setdiff(needed, names(sd_now))
+
+  if (!"WT_drawdown_cm" %in% names(sd_now) && "WT_drawdown" %in% names(sd_now))
+    sd_now$WT_drawdown_cm <- sd_now$WT_drawdown * 100
+
+  still <- setdiff(needed, names(sd_now))
+  if (length(still)) {
+    if (!all(c("Year", "Plot") %in% names(sd_now)))
+      stop(label, ": cannot join metadata, sample_data has no Year/Plot. Present: ",
+           paste(sort(names(sd_now)), collapse = ", "))
+    src <- sample_df |>
+      dplyr::mutate(.y = as.character(Year), .p = as.character(Plot)) |>
+      dplyr::select(.y, .p, dplyr::any_of(still)) |>
+      dplyr::distinct(.y, .p, .keep_all = TRUE)
+    sd_now$.y <- as.character(sd_now$Year)
+    sd_now$.p <- as.character(sd_now$Plot)
+    n_before  <- nrow(sd_now)
+    sd_now    <- dplyr::left_join(sd_now, src, by = c(".y", ".p"))
+    if (nrow(sd_now) != n_before)
+      stop(label, ": metadata join duplicated rows (", n_before, " -> ", nrow(sd_now), ")")
+    sd_now$.y <- NULL; sd_now$.p <- NULL
+    rownames(sd_now) <- keep_rn
+  }
+
+  after <- setdiff(needed, names(sd_now))
+  cat(sprintf("  %-10s missing before: %-32s after: %s\n", label,
+              if (length(before)) paste(before, collapse = ", ") else "none",
+              if (length(after))  paste(after,  collapse = ", ") else "none"))
+  for (v in intersect(needed, names(sd_now))) {
+    n_na <- sum(is.na(sd_now[[v]]))
+    if (n_na) cat(sprintf("             %s has %d/%d NA\n", v, n_na, nrow(sd_now)))
+  }
+
+  sample_data(ps) <- sample_data(sd_now)
+  ps
+}
+
+cat("\n=== MAG metadata repair ===\n")
+droughtMAG.ps          <- repair_mag_metadata(droughtMAG.ps,          "abundance")
+droughtMAG.activity.ps <- repair_mag_metadata(droughtMAG.activity.ps, "activity")
+
+cat("\n=== MAG builds in use ===\n")
+cat(" abundance:", MAG_ABUNDANCE_RDS, "|", nsamples(droughtMAG.ps),
+    "samples,", ntaxa(droughtMAG.ps), "taxa\n")
+cat(" activity :", MAG_ACTIVITY_RDS, "|", nsamples(droughtMAG.activity.ps),
+    "samples,", ntaxa(droughtMAG.activity.ps), "taxa\n")
+
+dis_16S <- phyloseq::distance(peat16S.phy.RA,     method = "bray")
+dis_ITS <- phyloseq::distance(peatITS.phy.RA,     method = "bray")
+dis_met <- phyloseq::distance(metabolites.phy.RA, method = "bray")
+dis_abd <- phyloseq::distance(droughtMAG.ps,          method = "bray")
+dis_act <- phyloseq::distance(droughtMAG.activity.ps, method = "bray")
+
+sd_16S <- data.frame(sample_data(peat16S.phy.RA))
+sd_ITS <- data.frame(sample_data(peatITS.phy.RA))
+sd_met <- data.frame(sample_data(metabolites.phy.RA))
+sd_abd <- data.frame(sample_data(droughtMAG.ps))
+sd_act <- data.frame(sample_data(droughtMAG.activity.ps))
+
+fit_16S <- run_dbrda(dis_16S, sd_16S, c("Condition(Depth)","Condition(Plot)"),
+                     "16S amplicons",  "Temp_avg_top + WT_drawdown_cm")
+fit_ITS <- run_dbrda(dis_ITS, sd_ITS, c("Condition(Depth)","Condition(Plot)"),
+                     "ITS amplicons",  "Temp_avg_top + WT_drawdown_cm")
+fit_met <- run_dbrda(dis_met, sd_met, "Condition(Plot)",
+                     "Metabolites",    "WT_drawdown_cm")
+fit_abd <- run_dbrda(dis_abd, sd_abd, "Condition(Plot)",
+                     "MAG abundance",  "Temp_avg_top + WT_drawdown_cm")
+fit_act <- run_dbrda(dis_act, sd_act, "Condition(Plot)",
+                     "MAG activity",   "Temp_avg_top * WT_drawdown_cm")
+
+DBRDA_FITS <- list(fit_act, fit_met, fit_16S, fit_ITS, fit_abd)
+```
+
+```{r dbrda-figures, fig.width=12, fig.height=13.5}
+
+FIG1A <- dbrda_panel(fit_act, sd_act, "WT_drawdown_cm",
+                     title = "Genome activity",
+                     high = "#FF6633", low = "#56B4E9")
+FIG1B <- dbrda_panel(fit_met, sd_met, "WT_drawdown_cm", flip_x = TRUE,
+                     title = "Metabolite composition",
+                     high = "#FF6633", low = "#56B4E9")
+FIG1C <- dbrda_panel(fit_16S, sd_16S, "Temp_avg_top",
+                     title = "Microbial community\n(16S rRNA gene)",
+                     high = "#BD0026", low = "#fcffb4")
+FIG1D <- dbrda_panel(fit_ITS, sd_ITS, "Temp_avg_top",
+                     title = "Fungal community (ITS)",
+                     high = "#BD0026", low = "#fcffb4")
+FIG_S4 <- dbrda_panel(fit_abd, sd_abd, "Temp_avg_top",
+                       title = "Genome abundance",
+                       high = "#BD0026", low = "#fcffb4")
+
+# Panel C carries a two-line title; pad the one-line titles so the four plot
+# areas in Figure 1 still start at the same height.
+PANEL_TITLE_LINES <- 2
+pad_title <- function(p, n = PANEL_TITLE_LINES) {
+  t <- p$labels$title
+  if (is.null(t) || !nzchar(t)) return(p)
+  extra <- n - lengths(regmatches(t, gregexpr("\n", t, fixed = TRUE)))[1] - 1
+  if (extra > 0) p <- p + labs(title = paste0(t, strrep("\n", extra)))
+  p
+}
+
+save_fig(FIG1A,   p_fig("Figure_1A_MAG_activity.pdf"),          width = 6, height = 6.2)
+save_fig(FIG1B,   p_fig("Figure_1B_metabolites.pdf"),           width = 6, height = 6.7)
+save_fig(FIG1C,   p_fig("Figure_1C_16S.pdf"),          width = 6, height = 6.9)
+save_fig(FIG1D,   p_fig("Figure_1D_ITS.pdf"),          width = 6, height = 6.7)
+save_fig(FIG_S4, p_fig("Figure_S4_MAG_abundance_dbRDA.pdf"),    width = 8, height = 6.7)
+save_fig(ggarrange(pad_title(FIG1A), pad_title(FIG1B),
+                   pad_title(FIG1C), pad_title(FIG1D),
+                   labels = c("A","B","C","D"),
+                   font.label = list(size = 25), ncol = 2, nrow = 2, legend = "none"),
+         p_fig("Figure_1_dbRDA.pdf"), height = 13.5, width = 12)
+
+# Supplementary Data 7: VIF for the selected model of each dataset, with the
+# full two-predictor VIF alongside.
+write_out(
+  purrr::map_dfr(DBRDA_FITS, \(f) data.frame(
+    model = f$label, vif_from = "selected model", terms = f$selected,
+    as.list(f$vif))) |>
+  dplyr::bind_rows(
+    purrr::map_dfr(DBRDA_FITS, \(f) data.frame(
+      model = f$label, vif_from = "full model",
+      terms = "Temp_avg_top + WT_drawdown_cm",
+      as.list(f$vif_full)))),
+  p_sd("Suppl_Data_07_dbRDA_VIF.csv"))
+print(purrr::map_dfr(DBRDA_FITS, \(f) data.frame(
+    model = f$label, terms_fitted = f$terms, terms_selected = f$selected,
+    adj_R2 = f$adj_R2, F_stat = f$anova$F[1], p_value = f$anova$`Pr(>F)`[1],
+    p_temp_marginal = f$p_temp, p_WT_marginal = f$p_wt,
+    p_interaction = f$p_interaction, n = f$n)), digits = 3, row.names = FALSE)
+```
+
+```{r dbrda-varpart, fig.width=16, fig.height=4}
+
+varpart_one <- function(dis, sampledf, label) {
+  vp <- varpart(dis, sampledf[, "Temp_avg_top", drop = FALSE],
+                     sampledf[, "WT_drawdown_cm", drop = FALSE])
+  cat("\n=== VarPart:", label, "===\n"); print(vp)
+  vp
+}
+vp_MAGactivity <- varpart_one(dis_act, sd_act, "MAG activity")
+vp_metabolites <- varpart_one(dis_met, sd_met, "Metabolites")
+vp_16S         <- varpart_one(dis_16S, sd_16S, "16S amplicons")
+
+# Partial permutation tests. Each predictor is tested with the other one moved
+# into the conditioning term, so the test matches the unique fraction reported by
+# varpart. The marginal tests in run_dbrda() test each predictor on its own and
+# do not.
+partial_dbrda <- function(dis, sampledf, condition, label, seed = 1234) {
+  cond <- paste(c(condition), collapse = " + ")
+  one <- function(pred, other) {
+    f <- as.formula(paste("dis ~", pred, "+ Condition(", other, ") +", cond))
+    set.seed(seed)
+    a <- anova(vegan::dbrda(f, data = sampledf), permutations = DBRDA_PERM)
+    r <- RsquareAdj(vegan::dbrda(f, data = sampledf))$adj.r.squared
+    data.frame(model = label, predictor = pred,
+               conditioned_on = paste(other, cond, sep = " + "),
+               partial_adj_R2 = r, F_stat = a$F[1], p_partial = a$`Pr(>F)`[1],
+               n = nrow(sampledf), stringsAsFactors = FALSE)
+  }
+  dplyr::bind_rows(one("Temp_avg_top",   "WT_drawdown_cm"),
+                   one("WT_drawdown_cm", "Temp_avg_top"))
+}
+
+PARTIAL_TESTS <- dplyr::bind_rows(
+  partial_dbrda(dis_act, sd_act, "Condition(Plot)",                          "MAG activity"),
+  partial_dbrda(dis_met, sd_met, "Condition(Plot)",                          "Metabolites"),
+  partial_dbrda(dis_16S, sd_16S, c("Condition(Depth)", "Condition(Plot)"),   "16S amplicons"),
+  partial_dbrda(dis_ITS, sd_ITS, c("Condition(Depth)", "Condition(Plot)"),   "ITS amplicons"),
+  partial_dbrda(dis_abd, sd_abd, "Condition(Plot)",                          "MAG abundance"))
+
+cat("\n=== Partial dbRDA tests (each predictor conditioned on the other) ===\n")
+print(as.data.frame(PARTIAL_TESTS), digits = 3, row.names = FALSE)
+# Not written on its own. These values are published beside the marginal tests in
+# Table_dbRDA_marginal_vs_partial.csv, which is the table the Results quote.
+
+# Marginal and partial P values side by side.
+print(
+  purrr::map_dfr(DBRDA_FITS, \(f) data.frame(
+      model = f$label, predictor = c("Temp_avg_top", "WT_drawdown_cm"),
+      p_marginal = c(f$p_temp, f$p_wt))) |>
+    dplyr::left_join(dplyr::select(PARTIAL_TESTS, model, predictor,
+                                   partial_adj_R2, p_partial),
+                     by = c("model", "predictor")), digits = 3, row.names = FALSE)
+
+pdf(p_fig("Figure_S9_variation_partitioning.pdf"), width = 16, height = 4)
+par(mfrow = c(1, 3))
+plot(vp_MAGactivity, digits = 2, Xnames = c("Temp","Water\ntable"),
+     main = "MAG Activity",  bg = c("tomato","steelblue"))
+plot(vp_metabolites, digits = 2, Xnames = c("Temp","Water\ntable"),
+     main = "Metabolites",   bg = c("tomato","steelblue"))
+plot(vp_16S,         digits = 2, Xnames = c("Temp","Water\ntable"),
+     main = "16S Amplicons", bg = c("tomato","steelblue"))
+dev.off()
+FILE_LOG <- c(FILE_LOG, p_fig("Figure_S9_variation_partitioning.pdf"))
+
+# Fractions are derived from vp$part$fract, whose row names state the model each
+# one came from: X1 is temperature, X2 is water table.
+#
+#   unique_temp = R2(X1+X2) - R2(X2 alone)
+#   unique_WT   = R2(X1+X2) - R2(X1 alone)
+#   shared      = R2(X1 alone) + R2(X2 alone) - R2(X1+X2)
+#   unexplained = 1 - R2(X1+X2)
+
+varpart_fractions <- function(vp, nm) {
+  fr  <- vp$part$fract
+  col <- grep("^Adj", colnames(fr), value = TRUE)[1]
+  rn  <- rownames(fr)
+  has1 <- grepl("X1", rn); has2 <- grepl("X2", rn)
+  i_ab  <- which(has1 & !has2)   # temperature alone
+  i_bc  <- which(has2 & !has1)   # water table alone
+  i_abc <- which(has1 &  has2)   # both
+  stopifnot(length(i_ab) == 1, length(i_bc) == 1, length(i_abc) == 1)
+
+  ab  <- fr[i_ab,  col]
+  bc  <- fr[i_bc,  col]
+  abc <- fr[i_abc, col]
+
+  out <- data.frame(model = nm,
+                    temp_alone   = ab,
+                    WT_alone     = bc,
+                    both         = abc,
+                    unique_temp  = abc - bc,
+                    unique_WT    = abc - ab,
+                    shared       = ab + bc - abc,
+                    unexplained  = 1 - abc,
+                    stringsAsFactors = FALSE)
+  stopifnot(isTRUE(all.equal(out$unique_temp + out$unique_WT + out$shared, abc,
+                             tolerance = 1e-8)))
+  out
+}
+
+VP_LIST <- list("MAG Activity" = vp_MAGactivity, "Metabolites" = vp_metabolites,
+                "16S Amplicons" = vp_16S)
+
+cat("\n=== varpart fract tables, as labelled by vegan ===\n")
+for (nm in names(VP_LIST)) {
+  cat("\n--", nm, "--\n"); print(VP_LIST[[nm]]$part$fract)
+  cat("   indfract rows, in file order:\n"); print(VP_LIST[[nm]]$part$indfract)
+}
+
+VARPART <- purrr::imap_dfr(VP_LIST, varpart_fractions)
+
+# The partial test P value belongs with the unique fraction it corresponds to.
+pt <- PARTIAL_TESTS |>
+  dplyr::mutate(.m = tolower(model)) |>
+  dplyr::select(.m, predictor, p_partial) |>
+  tidyr::pivot_wider(names_from = predictor, values_from = p_partial,
+                     names_prefix = "p_unique_")
+VARPART <- VARPART |>
+  dplyr::mutate(.m = tolower(model)) |>
+  dplyr::left_join(pt, by = ".m") |>
+  dplyr::select(-.m) |>
+  dplyr::rename(p_unique_temp = p_unique_Temp_avg_top,
+                p_unique_WT   = p_unique_WT_drawdown_cm) |>
+  dplyr::relocate(p_unique_temp, .after = unique_temp) |>
+  dplyr::relocate(p_unique_WT,   .after = unique_WT)
+if (any(is.na(VARPART$p_unique_temp) | is.na(VARPART$p_unique_WT)))
+  stop("Partial test P values did not join onto every varpart row. ",
+       "Check that VP_LIST names match PARTIAL_TESTS$model.")
+
+cat("\n=== Variation partitioning ===\n"); print(VARPART, row.names = FALSE)
+
+# The raw vegan fractions behind the summary above and Supplementary Figure S9.
+print(purrr::imap_dfr(VP_LIST, \(vp, nm) {
+    ind <- vp$part$indfract
+    col <- grep("^Adj", colnames(ind), value = TRUE)[1]
+    data.frame(model = nm, fraction = rownames(ind),
+               adj_R2 = suppressWarnings(as.numeric(ind[[col]])),
+               stringsAsFactors = FALSE)}), row.names = FALSE)
+```
+
+## 4. MAG-LEVEL MAASLIN2 — Figure 2
+
+```{r maaslin-MAG-level}
+
+# psmelt drops the CAMPER columns when the tax table is wide. Put them back.
+get_camper_annot <- function(ps) {
+  tt <- data.frame(tax_table(ps))
+  dplyr::select(tt, Gene, all_of(grep("^CAMPER", colnames(tt), value = TRUE)))
+}
+psmelt_with_camper <- function(ps) psmelt(ps) |> left_join(get_camper_annot(ps), by = "Gene")
+
+MAGactivity.ps <- prune_taxa(taxa_sums(droughtMAG.activity.ps) > 0, droughtMAG.activity.ps)
+taxdf_MAG      <- data.frame(tax_table(droughtMAG.ps))
+
+# Supplementary Data 6: taxonomy, genome quality and phenol-active gene counts
+# for all MAGs. The counts are the numerator behind the statement in the Results
+# that every MAG encodes at least one phenol-active enzyme, so they travel with
+# the table a reader would check it against.
+suppl_data_06 <- taxdf_MAG |>
+  dplyr::left_join(read_csv(p_meta("df_CAMPER.csv"), show_col_types = FALSE) |>
+                     dplyr::select(SPRUCE_ID, anoxic, oxic,
+                                   Specialist_phenol_decomposition),
+                   by = "SPRUCE_ID") |>
+  dplyr::mutate(anoxic = tidyr::replace_na(anoxic, 0L),
+                oxic   = tidyr::replace_na(oxic,   0L),
+                phenol_active_genes = anoxic + oxic,
+                Specialist_phenol_decomposition =
+                  tidyr::replace_na(Specialist_phenol_decomposition, "None"))
+
+cat(sprintf("Supplementary Data 6: %d MAGs, %d with at least one phenol-active gene (%.1f%%)\n",
+            nrow(suppl_data_06), sum(suppl_data_06$phenol_active_genes > 0),
+            100 * mean(suppl_data_06$phenol_active_genes > 0)))
+write_out(suppl_data_06, p_sd("Suppl_Data_06_MAG_taxonomy_quality.csv"))
+
+# --- MAG-level Maaslin2 results -----------------------------------------------
+
+if (REFIT_MAASLIN) {
+  fit_maaslin(MAGactivity.ps, "MaAslinLM_ActivityMAG",      "WT_drawdown_cm", NULL)
+  fit_maaslin(MAGactivity.ps, "MaAslinLM_MAGactivity_temp", "AvgTemp10cm",    NULL)
+  fit_maaslin(droughtMAG.ps,  "MaAslinLM_MAG_temp",         "AvgTemp10cm",    NULL)
+  fit_maaslin(MAGactivity.ps, "MaAslinLM_ActivityMAG_NOSC", "NOSC",           NULL)
+}
+df_CoefWT           <- read_maaslin(maaslin_path("MaAslinLM_ActivityMAG.rds"),      "SPRUCE_ID", TRUE)
+df_CoefTempActivity <- read_maaslin(maaslin_path("MaAslinLM_MAGactivity_temp.rds"), "SPRUCE_ID", TRUE)
+df_CoefTemp         <- read_maaslin(maaslin_path("MaAslinLM_MAG_temp.rds"),         "SPRUCE_ID", TRUE)
+df_CoefNOSC         <- read_maaslin(maaslin_path("MaAslinLM_ActivityMAG_NOSC.rds"), "SPRUCE_ID", TRUE)
+
+
+cat("\nMAG abundance ~ Temp: ",
+    sum(df_CoefTemp$pval < 0.05), " at P<0.05 | ",
+    sum(df_CoefTemp$qval < 0.05), " at q<0.05 | ",
+    sum(df_CoefTemp$qval < 0.10), " at q<0.10 | ",
+    sum(df_CoefTemp$qval < 0.25), " at q<0.25 | min q = ",
+    signif(min(df_CoefTemp$qval, na.rm = TRUE), 3), "\n", sep = "")
+
+# --- Supplementary Data 8: clustered MAG responses ----------------------------
+
+Clustered_df <- read_csv(p_raw_req(CLUSTER_CSV), show_col_types = FALSE)
+
+for (grp in list(list(ids = WSOX_IDS, cl = "Warming-stimulated oxic"),
+                 list(ids = WSAN_IDS, cl = "Warming-stimulated anoxic"),
+                 list(ids = WI_IDS,   cl = "Warming-inhibited"))) {
+  from_csv <- Clustered_df$SPRUCE_ID[Clustered_df$Cluster == grp$cl]
+  if (!setequal(grp$ids, from_csv))
+    stop(grp$cl, " in ", CLUSTER_CSV, " no longer matches the hardcoded vector. ",
+         "Only in file: ", paste(setdiff(from_csv, grp$ids), collapse = ", "),
+         " | only in code: ", paste(setdiff(grp$ids, from_csv), collapse = ", "))
+}
+
+Suppl_Data_08 <- taxdf_MAG |>
+  filter(SPRUCE_ID %in% Clustered_df$SPRUCE_ID) |>
+  left_join(dplyr::select(Clustered_df, SPRUCE_ID, Cluster), by = "SPRUCE_ID") |>
+  left_join(dplyr::select(df_CoefTemp, SPRUCE_ID, coef_Temp = coef, stderr_Temp = stderr,
+                          CI_lower_Temp = CI_lower, CI_upper_Temp = CI_upper,
+                          pval_Temp = pval, qval_Temp = qval, evidence_Temp = evidence),
+            by = "SPRUCE_ID") |>
+  left_join(dplyr::select(df_CoefWT, SPRUCE_ID, coef_WT = coef, stderr_WT = stderr,
+                          CI_lower_WT = CI_lower, CI_upper_WT = CI_upper,
+                          pval_WT = pval, qval_WT = qval, evidence_WT = evidence),
+            by = "SPRUCE_ID") |>
+  left_join(dplyr::select(df_CoefNOSC, SPRUCE_ID, coef_NOSC = coef, stderr_NOSC = stderr,
+                          pval_NOSC = pval, qval_NOSC = qval, evidence_NOSC = evidence),
+            by = "SPRUCE_ID") |>
+  dplyr::select(Drought_ID, Domain, Phylum, Class, Order, Family, Genus, Species,
+                SPRUCE_ID, Cluster,
+                starts_with("coef_Temp"), starts_with("stderr_Temp"),
+                starts_with("CI_lower_Temp"), starts_with("CI_upper_Temp"),
+                pval_Temp, qval_Temp, evidence_Temp,
+                coef_WT, stderr_WT, CI_lower_WT, CI_upper_WT, pval_WT, qval_WT, evidence_WT,
+                coef_NOSC, stderr_NOSC, pval_NOSC, qval_NOSC, evidence_NOSC) |>
+  arrange(Cluster, SPRUCE_ID)
+write_out(Suppl_Data_08, p_sd("Suppl_Data_08_MAG_responses.csv"))
+
+# Figure 3 node set: the P<0.05 subset of the fixed-effects abundance model.
+Fig3_node_set <- filter(df_CoefTemp, pval <= 0.05)$SPRUCE_ID
+cat("Figure 3 node set:", length(Fig3_node_set), "warming-responsive MAGs\n")
+if (!setequal(Fig3_node_set, WARMING_RESPONSIVE_IDS))
+  warning("Figure 3 node set no longer equals the three warming clusters. ",
+          "Symmetric difference: ",
+          paste(union(setdiff(Fig3_node_set, WARMING_RESPONSIVE_IDS),
+                      setdiff(WARMING_RESPONSIVE_IDS, Fig3_node_set)), collapse = ", "))
+```
+
+```{r fig2, fig.width=15, fig.height=15}
+
+# --- Figure 2A: genome response tree -------------------------------------------------
+
+Taxa_Phenol_active_annotations <- read_csv(p_raw_req("Taxa_Phenol_active_annotations.csv"), show_col_types = FALSE)
+colnames(Taxa_Phenol_active_annotations)[1:3] <- c("Drought_ID","anoxic_potential","oxic_potential")
+
+tax_INFO <- taxdf_MAG |>
+  left_join(dplyr::select(Clustered_df, SPRUCE_ID, Cluster), by = "SPRUCE_ID") |>
+  left_join(read_csv(p_meta("df_CAMPER.csv"), show_col_types = FALSE), by = "SPRUCE_ID") |>
+  left_join(dplyr::select(df_CoefWT,   SPRUCE_ID, coef_waterdrawdown = coef), by = "SPRUCE_ID") |>
+  left_join(dplyr::select(df_CoefTemp, SPRUCE_ID, coef_temp = coef),          by = "SPRUCE_ID") |>
+  left_join(Taxa_Phenol_active_annotations, by = "Drought_ID") |>
+  mutate(Circle = 1,
+         Cluster = as.factor(replace_na(Cluster, "None")),
+         Talent_specialist = ifelse(Talent_Status == "none", "none", Specialist))
+rownames(tax_INFO) <- tax_INFO$SPRUCE_ID
+
+required_cols <- c("Circle","Phylum","Talent_specialist","coef_waterdrawdown","coef_temp","anoxic","oxic")
+if (length(setdiff(required_cols, colnames(tax_INFO))))
+  stop("Missing columns in tax_INFO: ",
+       paste(setdiff(required_cols, colnames(tax_INFO)), collapse = ", "))
+
+# Node 509 is the root of this tree file.
+phy_tree(droughtMAG.ps) <- ape::root(phy_tree(droughtMAG.ps), node = 509)
+tre_full <- phy_tree(droughtMAG.ps)
+
+orderMAGs   <- unique(get_taxa_name(ggtree(tre_full)))
+orderPhylum <- unique(taxdf_MAG[match(orderMAGs, taxdf_MAG$SPRUCE_ID), "Phylum"])
+tax_INFO$Phylum <- factor(tax_INFO$Phylum, levels = rev(orderPhylum))
+write_out(data.frame(Phylum = levels(tax_INFO$Phylum),
+                     color  = unname(pals::glasbey())[seq_along(levels(tax_INFO$Phylum))]),
+          p_meta("phylum_color_df.csv"))
+
+tre_full_w_INFO <- full_join(as_tibble(tre_full), tax_INFO, by = c("label" = "SPRUCE_ID")) |>
+  tidytree::as.treedata()
+
+p3 <- ggtree(tre_full_w_INFO, layout = "fan", open.angle = 8, size = 0.1) +
+  geom_tiplab(aes(label = ifelse(Cluster != "None", label, NA), color = Cluster),
+              size = 3, offset = 0.1, align = TRUE) +
+  scale_color_manual(values = cluster_colors) +
+  theme(legend.position = "none") +
+  geom_fruit(geom = geom_bar, mapping = aes(y = SPRUCE_ID, x = Circle, fill = Phylum),
+             size = 1, pwidth = 0.1, offset = 0.55, stat = "identity", orientation = "y",
+             axis.param = list(axis = "none")) +
+  scale_fill_manual(values = unname(pals::glasbey())) +
+  ggnewscale::new_scale_fill() +
+  geom_fruit(geom = geom_star, mapping = aes(y = SPRUCE_ID, fill = Talent_specialist),
+             size = 3, stroke = NA, starshape = 1, starstroke = 0, inherit.aes = FALSE) +
+  scale_fill_manual(values = specialist_colors) +
+  ggnewscale::new_scale_fill()
+
+FIG_2A <- p3 +
+  geom_fruit(geom = geom_bar, mapping = aes(y = SPRUCE_ID, x = Circle, fill = coef_waterdrawdown),
+             size = 0.05, pwidth = 0.1, stat = "identity", orientation = "y",
+             axis.param = list(axis = "none")) +
+  scale_fill_gradient2(low = "forestgreen", mid = "white", high = "darkgoldenrod4",
+                       midpoint = 0, na.value = "grey90") +
+  labs(fill = "Change in relative activity\nwith water table drawdown") +
+  ggnewscale::new_scale_fill() +
+  geom_fruit(geom = geom_bar, mapping = aes(y = SPRUCE_ID, x = Circle, fill = coef_temp),
+             size = 0.05, pwidth = 0.1, stat = "identity", orientation = "y",
+             axis.param = list(axis = "none")) +
+  scale_fill_gradient2(low = "#9eb6d0", mid = "white", high = "#e0301e",
+                       midpoint = 0, na.value = "grey90") +
+  labs(fill = "Change in relative abundance\nwith warming")
+save_fig(FIG_2A, p_fig("Figure_2A_genome_response_tree.pdf"), height = 15, width = 15)
+
+# --- Figure 2B: porewater CO2 vs genome group ---------------------------------
+
+# PWgas has one row per enclosure-year-depth. Collapse to one value per
+# enclosure-year before joining to a genome table.
+dup_depths <- PWgas |> count(Year, Plot) |> filter(n > 1) |> nrow()
+if (dup_depths > 0)
+  message(dup_depths, " enclosure-years have porewater measured at more than one ",
+          "depth; averaging across depth before joining.")
+PWgas_sub <- PWgas |>
+  group_by(Year, Plot) |>
+  dplyr::summarise(across(c(CH4mM, CO2mM), \(x) mean(x, na.rm = TRUE)), .groups = "drop") |>
+  mutate(Year = as.factor(Year), Plot = as.factor(Plot))
+
+# Figure 2B is relative abundance. The axis label is built from the same
+# constant as the data.
+FIG2B_MEASURE <- "abundance"
+fig2b_ps      <- droughtMAG.ps
+FIG2B_AXIS    <- paste("Total relative", FIG2B_MEASURE, "of")
+
+summarise_genome_group <- function(ids, ps = fig2b_ps, label = "genome group") {
+  keep <- prune_taxa(taxa_names(ps) %in% ids, ps)
+  if (!setequal(taxa_names(keep), ids))
+    stop(label, ": genomes missing from the object: ",
+         paste(setdiff(ids, taxa_names(keep)), collapse = ", "))
+  out <- psmelt(keep) |>
+    dplyr::select(Abundance, SPRUCE_ID, Warming, Year, CO2_Treatment, AvgTemp10cm,
+                  Temp_avg_top, WT_drawdown, Warming_Treatment.ord, Plot) |>
+    mutate(WT_drawdown_cm = WT_drawdown * 100, Year = as.factor(Year), Plot = as.factor(Plot)) |>
+    left_join(PWgas_sub, by = c("Year", "Plot")) |>
+    filter(!is.na(CO2mM)) |>
+    group_by(Warming, Year, CO2_Treatment, AvgTemp10cm, Temp_avg_top,
+             WT_drawdown_cm, Warming_Treatment.ord, Plot, CO2mM) |>
+    dplyr::summarize(sum_Abundance = sum(Abundance, na.rm = TRUE),
+                     n_genomes = dplyr::n(), .groups = "drop")
+  if (!all(out$n_genomes == length(ids)))
+    stop(label, ": incomplete genome sums, n_genomes ranges ",
+         paste(range(out$n_genomes), collapse = "-"), " but should be ", length(ids))
+  out
+}
+
+df_wsox <- summarise_genome_group(WSOX_IDS, label = "WS-OX")
+df_wsan <- summarise_genome_group(WSAN_IDS, label = "WS-AN")
+df_wi   <- summarise_genome_group(WI_IDS,   label = "WI")
+
+# Holm across the three groups.
+co2_group_models <- purrr::imap_dfr(
+  list("WS-OX" = df_wsox, "WS-AN" = df_wsan, "WI" = df_wi),
+  \(d, nm) {
+    m <- lm(CO2mM ~ sum_Abundance, data = d)
+    s <- summary(m)
+    data.frame(measure = FIG2B_MEASURE, group = nm, n = nobs(m),
+               slope = coef(m)[2], adj_R2 = s$adj.r.squared,
+               p_value = s$coefficients[2, 4],
+               x_min = min(d$sum_Abundance), x_max = max(d$sum_Abundance))
+  }) |>
+  mutate(p_holm = p.adjust(p_value, method = "holm"))
+
+cat("\n=== Porewater CO2 vs genome-group total relative abundance ===\n")
+print(as.data.frame(co2_group_models), digits = 4, row.names = FALSE)
+if (!any(co2_group_models$p_holm < 0.05))
+  cat("NOTE: no group survives Holm correction across the three tests.\n")
+
+scatter_co2 <- function(df, xlab, legend_pos = "none") {
+  ggplot(df, aes(x = sum_Abundance, y = CO2mM)) +
+    geom_point(aes(fill = Warming_Treatment.ord, shape = Year), colour = "black", size = 8) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed", linewidth = 1) +
+    scale_fill_manual(values = allGroupsColors) + scale_shape_manual(values = c(21, 22, 24)) +
+    guides(fill = guide_legend("Temperature\ntreatment", override.aes = list(shape = 21))) +
+    xlab(xlab) + ylab("Pore water CO2 (mM)") + theme_bw() +
+    theme(legend.position = legend_pos, axis.text = element_text(size = 16),
+          axis.title = element_text(size = 18))
+}
+
+fig2b_C <- scatter_co2(df_wi, paste(FIG2B_AXIS, "WI"), "right")
+save_legend(fig2b_C, legend_path(p_fig("Figure_2B_CO2_genome_scatter.pdf")),
+            width = 3, height = 5)
+save_fig(ggarrange(
+    scatter_co2(df_wsan, paste(FIG2B_AXIS, "WS-AN")),
+    scatter_co2(df_wsox, paste(FIG2B_AXIS, "WS-OX")),
+    fig2b_C + theme(legend.position = "none"),
+    ncol = 3, labels = c("A","B","C"), font.label = list(size = 18)),
+  p_fig("Figure_2B_CO2_genome_scatter.pdf"), width = 15, height = 5)
+
+# Sensitivity: the WS-OX relationship on the two core genomes only.
+cat("WS-OX core (SPRUCE 397, 2183) adj R2 =",
+    round(summary(lm(CO2mM ~ sum_Abundance,
+      data = summarise_genome_group(c("SPRUCE 397","SPRUCE 2183"),
+                                    fig2b_ps, "core WS-OX")))$adj.r.squared, 3), "\n")
+
+# --- Figure 2C: phylogenetic tree ---------------------------------------------
+
+FIG_2C <- p3 +
+  geom_fruit(geom = geom_bar, mapping = aes(y = SPRUCE_ID, x = anoxic), fill = "#7CB9E8",
+             stat = "identity", orientation = "y",
+             axis.params = list(axis = "x", text.angle = -90, text.size = 1.5,
+                                line.size = 0, vjust = 0.5)) +
+  geom_fruit(geom = geom_bar, mapping = aes(y = SPRUCE_ID, x = oxic), fill = "#F88379",
+             stat = "identity", orientation = "y",
+             axis.params = list(axis = "x", text.angle = -90, text.size = 1.5,
+                                line.size = 0, vjust = 0.5))
+save_fig(FIG_2C, p_fig("Figure_2C_phylogenetic_tree.pdf"), height = 10, width = 10)
+```
+
+## 5. CO-OCCURRENCE NETWORK (SpiecEasi) — Figure 3
+
+`RUN_NETWORK <- TRUE` fits SpiecEasi and writes `se_FULL.RDS` and
+`assoMat_FULL.Rds` into `08_network/`. `FALSE` reloads those two files and
+rebuilds the graph, the linking tables and the figure from them.
+
+Everything this section writes goes to `08_network/`, except Supplementary
+Data 10, which also goes to `04_suppl_data/`.
+
+```{r network-build}
+
+# Refit SpiecEasi RESAMPLE_N times on random 80% subsets of the metabolite
+# features and record, for each edge of the displayed network, the fraction of
+# replicates in which it is recovered. This tests sensitivity to the retained
+# metabolite set; it is not a bootstrap over samples.
+resample_edge_recovery <- function(target_edges, mag_mat, met_mat, n_rep) {
+  recovered <- replicate(n_rep, {
+    keep_cols <- sample(seq_len(ncol(met_mat)), round(0.8 * ncol(met_mat)))
+    se_r <- multi.spiec.easi(list(mag_mat, met_mat[, keep_cols, drop = FALSE]),
+      method = "mb", lambda.min.ratio = 1e-3, nlambda = 20,
+      pulsar.params = list(rep.num = 20, ncores = 1))
+    m <- as.matrix(symBeta(getOptBeta(se_r), mode = "ave"))
+    dimnames(m) <- list(c(colnames(mag_mat), colnames(met_mat)[keep_cols]),
+                        c(colnames(mag_mat), colnames(met_mat)[keep_cols]))
+    gg <- graph_from_adjacency_matrix(m, mode = "undirected",
+                                      weighted = TRUE, diag = FALSE)
+    e  <- apply(ends(gg, E(gg)), 1, \(x) paste(sort(x), collapse = "|"))
+    target_edges %in% e
+  })
+  data.frame(edge = target_edges, recovery_frequency = rowMeans(recovered))
+}
+
+PS_helper     <- function(x) (x - mean(x)) / sqrt(sd(x, na.rm = TRUE))
+pareto_scale  <- function(x) data.frame(apply(x, 2, PS_helper))
+log_helper    <- function(x, min.val) log2((x + sqrt(x^2 + min.val^2)) / 2)
+log_transform <- function(x) {
+  x_nz    <- x[, which(apply(x, 2, sum) != 0)]
+  min.val <- min(abs(x_nz[x_nz != 0])) / 10
+  data.frame(apply(x_nz, 2, log_helper, min.val))
+}
+get_sample_matrix <- function(ps) {
+  otu <- as(otu_table(ps), "matrix")
+  if (taxa_are_rows(ps)) otu <- t(otu)
+  otu
+}
+
+# ---- Metabolites -------------------------------------------------------------
+
+# Same reader as sections 2.8 and 2.9, so the network is built on exactly the
+# metabolite set the supplementary tables describe: unnamed sentinel filtered,
+# MSI levels on the four-level scheme.
+metab_net_ps <- read_metab_ps(quiet = TRUE)
+met_clean <- data.frame(otu_table(metab_net_ps, taxa_are_rows = TRUE)) |>
+  log_transform() |> pareto_scale()
+metabolites_clean <- metab_net_ps
+metabolites_clean@otu_table <- otu_table(as.matrix(met_clean), taxa_are_rows = TRUE)
+
+# Above the 30th percentile of taxa_sums, then restricted to features with an
+# annotation confidence and a name.
+threshold <- quantile(taxa_sums(metabolites_clean), ABUND_QUANTILE)
+metabolites_phylo_sub <- metabolites_clean |>
+  prune_taxa(taxa_sums(metabolites_clean) > threshold, x = _) |>
+  subset_taxa(!is.na(Annotation_Confidence)) |>
+  subset_taxa(!is.na(Final_name))
+cat(sprintf("  Metabolites: %d (from %d)\n",
+            ntaxa(metabolites_phylo_sub), ntaxa(metab_net_ps)))
+# The "M" sentinel is removed upstream in read_metab_ps(), so !is.na(Final_name)
+# already excludes it. Assert rather than filter again, so a regression shows up
+# here instead of silently changing the network input.
+stopifnot(!any(as.data.frame(tax_table(metabolites_phylo_sub))$Final_name %in% "M"))
+saveRDS(metabolites_phylo_sub, p_net("metabolites_phylo_Filtered.RDS"))
+
+# ---- MAGs --------------------------------------------------------------------
+
+MAGactivity.net.ps <- readRDS(p_raw_req(MAG_ACTIVITY_RDS))
+sampledf_net <- data.frame(sample_data(MAGactivity.net.ps))
+sample_names(MAGactivity.net.ps) <- paste0("P", sampledf_net$Plot, "_", sampledf_net$Year)
+
+# Methanogens by KEGG module presence.
+methanogen_modules <- c("Methanogen_CO2_M00567", "Methanogen_Acetate_M00357",
+                        "Methanogen_Methanol_M00356", "Methanogen_Methylamine_M00563")
+mods    <- read_csv(p_raw_req(MODULE_CSV), show_col_types = FALSE)
+present <- intersect(methanogen_modules, names(mods))
+methanogens <- mods$SPRUCE_ID[rowSums(!is.na(mods[, present, drop = FALSE]) &
+                                      mods[, present, drop = FALSE] != "") > 0]
+stopifnot(setequal(methanogens, METHANOGEN_IDS))
+
+targets <- Clustered_df$SPRUCE_ID[Clustered_df$Cluster %in%
+  c("Warming-stimulated anoxic", "Warming-stimulated oxic", "Warming-inhibited")]
+ps_MAG_sub <- subset_taxa(MAGactivity.net.ps, SPRUCE_ID %in% c(targets, methanogens))
+cat(sprintf("  MAGs: %d (%d warming-responsive + %d methanogens)\n",
+            ntaxa(ps_MAG_sub), length(targets), length(methanogens)))
+saveRDS(ps_MAG_sub, p_net("ps_MAG_FilteredSensitive.RDS"))
+
+# ---- Align -------------------------------------------------------------------
+
+mag_mat <- get_sample_matrix(ps_MAG_sub)
+met_mat <- get_sample_matrix(metabolites_phylo_sub)
+shared  <- sort(intersect(rownames(mag_mat), rownames(met_mat)))
+mag_mat <- mag_mat[shared, , drop = FALSE]
+met_mat <- met_mat[shared, , drop = FALSE]
+stopifnot(identical(rownames(mag_mat), rownames(met_mat)))
+cat(sprintf("  Samples: %d | MAGs: %d | Metabolites: %d\n",
+            nrow(mag_mat), ncol(mag_mat), ncol(met_mat)))
+
+# ---- SpiecEasi ---------------------------------------------------------------
+
+if (RUN_NETWORK) {
+  se_FULL <- multi.spiec.easi(list(mag_mat, met_mat), method = "mb",
+    lambda.min.ratio = 1e-3, nlambda = 20,
+    pulsar.params = list(rep.num = 20, ncores = 1))
+  assoMat_FULL <- as.matrix(symBeta(getOptBeta(se_FULL), mode = "ave"))
+  dimnames(assoMat_FULL) <- list(c(colnames(mag_mat), colnames(met_mat)),
+                                 c(colnames(mag_mat), colnames(met_mat)))
+  diag(assoMat_FULL) <- 1
+  saveRDS(se_FULL,      p_net("se_FULL.RDS"))
+  saveRDS(assoMat_FULL, p_net("assoMat_FULL.Rds"))
+} else {
+  se_FULL      <- readRDS(net_path("se_FULL.RDS"))
+  assoMat_FULL <- readRDS(net_path("assoMat_FULL.Rds"))
+}
+
+# StARS stability is a whole-network quantity, not a per-edge quantity.
+cat(sprintf("  StARS stability: %.4f | edges: %d\n",
+            getStability(se_FULL), sum(getRefit(se_FULL)) / 2))
+```
+
+```{r network-graph, fig.width=14, fig.height=14}
+
+all_MAGs <- c(targets, methanogens)
+g_full <- graph_from_adjacency_matrix(assoMat_FULL, mode = "undirected",
+                                      weighted = TRUE, diag = FALSE)
+g_full <- set_edge_attr(g_full, "color",
+  value = ifelse(edge_attr(g_full, "weight") > 0, "forestgreen", "#D2042D"))
+
+ee   <- ends(g_full, E(g_full))
+keep_e <- which(degree(g_full, ee[,1]) > DEGREE_THRESHOLD |
+                degree(g_full, ee[,2]) > DEGREE_THRESHOLD)
+g_sub <- subgraph_from_edges(g_full, keep_e)
+ee2   <- ends(g_sub, E(g_sub))
+g_sub2 <- induced_subgraph(g_sub,
+  unique(c(ee2[which(ee2[,1] %in% all_MAGs | ee2[,2] %in% all_MAGs), ])))
+cat(sprintf("  After degree filter (>%d): %d edges\n", DEGREE_THRESHOLD, ecount(g_sub)))
+
+G1 <- Clustered_df$SPRUCE_ID[Clustered_df$Cluster == "Warming-stimulated anoxic"]
+G2 <- Clustered_df$SPRUCE_ID[Clustered_df$Cluster == "Warming-stimulated oxic"]
+G3 <- Clustered_df$SPRUCE_ID[Clustered_df$Cluster == "Warming-inhibited"]
+
+get_edge_weight <- function(a, b, m)
+  if (a %in% rownames(m) && b %in% colnames(m)) m[a, b] else NA_real_
+
+connections_df <- purrr::map_dfr(V(g_sub2)$name[V(g_sub2)$name %in% targets], function(smag) {
+  metabs <- setdiff(neighbors(g_sub2, smag)$name, all_MAGs)
+  purrr::map_dfr(metabs, function(metab) {
+    meths <- intersect(neighbors(g_sub2, metab)$name, methanogens)
+    if (!length(meths)) return(NULL)
+    w1 <- get_edge_weight(smag, metab, assoMat_FULL)
+    purrr::map_dfr(meths, function(meth) {
+      w2 <- get_edge_weight(metab, meth, assoMat_FULL)
+      data.frame(genome = smag, metabolite = metab, methanogen = meth,
+                 weight_genome_metab = w1, weight_metab_methanogen = w2,
+                 sign_genome_metab     = ifelse(is.na(w1), NA, ifelse(w1 > 0, "positive", "negative")),
+                 sign_metab_methanogen = ifelse(is.na(w2), NA, ifelse(w2 > 0, "positive", "negative")))
+    })
+  })
+})
+if (nrow(connections_df) == 0) stop("No genome-metabolite-methanogen paths found.")
+cat(sprintf("  Genome-methanogen connections: %d\n", nrow(connections_df)))
+
+df_metab <- tibble::rownames_to_column(data.frame(tax_table(metabolites_phylo_sub)), "metabolite")
+df_metab$Final_name <- apply_name_aliases(df_metab$Final_name)
+df_MAG   <- data.frame(tax_table(ps_MAG_sub))
+
+write_out(connections_df, p_net("Linking_Metabolites.csv"))
+write_out(left_join(connections_df, df_metab, by = "metabolite"),
+          p_net("Linking_Metabolites_INFO.csv"))
+
+path_verts <- unique(c(connections_df$genome, connections_df$metabolite, connections_df$methanogen))
+g_net <- induced_subgraph(g_sub2, path_verts)
+drop_same_type <- function(g, type) {
+  ee <- ends(g, E(g))
+  t1 <- ifelse(ee[,1] %in% all_MAGs, "MAG", "Metabolite")
+  t2 <- ifelse(ee[,2] %in% all_MAGs, "MAG", "Metabolite")
+  delete_edges(g, which(t1 == type & t2 == type))
+}
+g_net <- drop_same_type(drop_same_type(g_net, "Metabolite"), "MAG")
+cat(sprintf("  Final: %d nodes | %d edges\n", vcount(g_net), ecount(g_net)))
+saveRDS(g_net, p_net("igraph_Fig3_network.RDS"))
+
+# ---- Edge recovery under node resampling -------------------------------------
+# The stored result in 00_inputs/ is valid only for the edge set it was computed
+# on. If the metabolite filter, the abundance quantile or the SpiecEasi fit
+# changes the displayed edges, the knit either recomputes (RUN_RESAMPLE) or stops.
+
+fig3_edges  <- apply(ends(g_net, E(g_net)), 1, \(x) paste(sort(x), collapse = "|"))
+stab_path   <- p_raw("Check_Fig3_edge_stability.csv")
+stab_stored <- if (file.exists(stab_path))
+  read_csv(stab_path, show_col_types = FALSE) else NULL
+stab_stale  <- is.null(stab_stored) || !setequal(stab_stored$edge, fig3_edges)
+
+if (stab_stale && !RUN_RESAMPLE)
+  stop("Check_Fig3_edge_stability.csv does not describe the current Figure 3 edge set. ",
+       if (is.null(stab_stored)) "The file is missing. " else paste0(
+         length(setdiff(stab_stored$edge, fig3_edges)), " edge(s) only in the file, ",
+         length(setdiff(fig3_edges, stab_stored$edge)), " only in the graph. "),
+       "Set RUN_RESAMPLE <- TRUE and re-knit; budget roughly ", RESAMPLE_N,
+       " x the SpiecEasi fit time.")
+
+if (stab_stale) {
+  message("Edge set changed. Refitting SpiecEasi ", RESAMPLE_N,
+          " times on random 80% subsets of the metabolite set.")
+  edge_stability <- resample_edge_recovery(fig3_edges, mag_mat, met_mat, RESAMPLE_N)
+  write.csv(edge_stability, stab_path, row.names = FALSE)
+} else {
+  edge_stability <- stab_stored
+}
+
+metab_name_all <- setNames(df_metab$Final_name, df_metab$metabolite)
+edge_stability <- edge_stability |>
+  tidyr::separate(edge, c("node_a", "node_b"), sep = "\\|", remove = FALSE) |>
+  dplyr::mutate(
+    MAG             = ifelse(node_a %in% all_MAGs, node_a, node_b),
+    metabolite      = ifelse(node_a %in% all_MAGs, node_b, node_a),
+    metabolite_name = unname(metab_name_all[metabolite]),
+    edge_type       = ifelse(MAG %in% methanogens,
+                             "metabolite-methanogen", "MAG-metabolite")) |>
+  dplyr::select(edge, MAG, metabolite, metabolite_name, edge_type, recovery_frequency) |>
+  dplyr::arrange(dplyr::desc(recovery_frequency))
+
+rf <- edge_stability$recovery_frequency
+cat(sprintf(
+  "\nFigure 3 edge recovery, %d resampling replicates: %d edges, median %.2f, mean %.2f, range %.2f to %.2f\n",
+  RESAMPLE_N, length(rf), median(rf), mean(rf), min(rf), max(rf)))
+for (thr in c(0.5, 0.7, 0.8, 0.9))
+  cat(sprintf("  recovered in >= %.0f%% of replicates: %d of %d\n",
+              100 * thr, sum(rf >= thr), length(rf)))
+
+# ---- Node metadata and plot --------------------------------------------------
+
+vn <- V(g_net)$name
+metab_superclass <- setNames(df_metab$Superclass, df_metab$metabolite)
+
+classify_metab <- function(superclass) dplyr::case_when(
+  superclass == "Lipids and lipid-like molecules"      ~ "Lipids and derivatives",
+  superclass %in% c("Organic acids and derivatives", "Organic nitrogen compounds",
+                    "Organoheterocyclic compounds", "Nucleosides, nucleotides, and analogues",
+                    "Alkaloids and derivatives")       ~ "Amino acids and derivatives",
+  superclass %in% NETWORK_PHENOLIC_SUPERCLASSES        ~ "Phenolic and polyphenolic compounds",
+  TRUE                                                 ~ "Other organic compounds")
+
+node_group <- dplyr::case_when(
+  vn %in% methanogens ~ "Methanogen",
+  vn %in% G1 ~ "Warming-stimulated anoxic-preferring",
+  vn %in% G2 ~ "Warming-stimulated oxic-preferring",
+  vn %in% G3 ~ "Warming-inhibited",
+  TRUE ~ classify_metab(metab_superclass[vn]))
+node_type  <- ifelse(vn %in% all_MAGs, "MAG", "Metabolite")
+
+mag_lookup   <- setNames(paste0(df_MAG$SPRUCE_ID, ": ", df_MAG$Phylum), df_MAG$SPRUCE_ID)
+metab_lookup <- setNames(df_metab$Final_name, df_metab$metabolite)
+
+# Two independent reasons a Figure 3 node should not carry a compound name, both
+# applied:
+#
+#   1. MSI level. L3 and L4 assignments are computational proposals; the name is
+#      the best-matching candidate structure, not an identification. Printing it
+#      on a figure asserts more than the data support. Only L1 and L2 features
+#      (MSI_NAMEABLE) keep their name.
+#   2. Biological implausibility. A handful of L1/L2 annotations are implausible
+#      in an ombrotrophic bog regardless of the spectral evidence. Estriol is the
+#      clearest case: it passes as L2 and is a mammalian steroid.
+#
+# Everything else is labelled by ClassyFire class plus the feature identifier, so
+# the node is traceable to a row of Supplementary Data 10 without asserting a
+# structure. The candidate name stays in Supplementary Data 10.
+UNEXPECTED_ANNOTATIONS <- c(
+  "Estriol", "17-Amino-5alpha-androstan-11-ol", "cis-Dehydroretinal",
+  "Pfaffic acid", "Decarboxyhypothamnolic acid", "Ramalinic acid A")
+
+# Two compound names are too long for a label box. Shortened for the figure
+# only; the full name is in Supplementary Data 10. The kavalactone pair is the
+# NAME_ALIASES diastereomer, so both features carry the same shortened label.
+FIG3_NAME_SHORT <- c(
+  "5-Hydroxy-4-methoxy-6-(2-phenylethyl)-5,6-dihydro-2H-pyran-2-one (stereochemistry unresolved)" =
+    "Kavalactone\n(stereochemistry unresolved)")
+
+# Some ClassyFire strings are too long to sit on a node. Shortened for the figure
+# only; the full class is in Supplementary Data 10.
+CLASS_LABEL_SHORT <- c(
+  "Lignans, neolignans and related compounds" = "Lignan-like",
+  "Steroids and steroid derivatives"          = "Steroid",
+  "Prenol lipids"                             = "Prenol lipid",
+  "Depsides and depsidones"                   = "Depsidone")
+
+blankna <- function(x) ifelse(is.na(x) | x %in% c("", "NA"), NA_character_, x)
+class_label <- function(feature) {
+  r <- df_metab[match(feature, df_metab$metabolite), , drop = FALSE]
+  lab <- dplyr::coalesce(blankna(r$Subclass), blankna(r$Class),
+                         blankna(r$Superclass))
+  short <- unname(CLASS_LABEL_SHORT[lab])
+  lab <- ifelse(is.na(short), lab, short)
+  ifelse(is.na(lab), "unclassified feature", paste0(lab, " (putative)"))
+}
+
+metab_msi     <- setNames(df_metab$Annotation_Confidence, df_metab$metabolite)
+metab_display <- unname(metab_lookup[vn])
+is_metab      <- !(vn %in% all_MAGs)
+
+short_hit <- !is.na(metab_display) & metab_display %in% names(FIG3_NAME_SHORT)
+metab_display[short_hit] <- unname(FIG3_NAME_SHORT[metab_display[short_hit]])
+
+msi_vn   <- unname(metab_msi[vn])
+low_conf <- is_metab & (is.na(msi_vn) | !(msi_vn %in% MSI_NAMEABLE))
+implaus  <- is_metab & !is.na(metab_display) &
+            metab_display %in% UNEXPECTED_ANNOTATIONS
+reclass  <- low_conf | implaus
+
+reclass_reason <- dplyr::case_when(
+  low_conf & implaus ~ "MSI L3/L4 and implausible in an ombrotrophic bog",
+  low_conf           ~ "MSI L3/L4 or unannotated: name is a candidate structure",
+  implaus            ~ "implausible in an ombrotrophic bog",
+  TRUE               ~ NA_character_)
+
+if (any(reclass)) {
+  # Class on the first line, feature ID on the second, so the node stays
+  # traceable to a row of Supplementary Data 10.
+  metab_display[reclass] <- paste0(class_label(vn[reclass]), "\n", vn[reclass])
+  cat(sprintf("  Figure 3: %d of %d metabolite label(s) replaced by class + feature ID\n",
+              sum(reclass), sum(is_metab)))
+  print(table(reclass_reason[reclass]))
+}
+
+# The network filter requires a non-missing Final_name, so this should never
+# fire; if the filter is ever loosened, the node falls back to its feature ID
+# rather than printing the string "NA".
+no_label <- is_metab & is.na(metab_display)
+if (any(no_label)) {
+  warning(sum(no_label), " metabolite node(s) reached Figure 3 with no label; ",
+          "using the feature ID.")
+  metab_display[no_label] <- vn[no_label]
+}
+
+# Every metabolite label carries its MSI level, so a reader can see at a glance
+# how much of the network rests on computational annotation.
+msi_tag <- ifelse(is.na(msi_vn), "unannotated", msi_vn)
+metab_display[is_metab] <- paste0(metab_display[is_metab], " [", msi_tag[is_metab], "]")
+
+display_name <- ifelse(vn %in% all_MAGs, unname(mag_lookup[vn]), metab_display)
+display_name[is.na(display_name)] <- vn[is.na(display_name)]
+
+fermenter_ids <- c("SPRUCE 124", "SPRUCE 675")
+all_levels <- c("Methanogen", "Warming-stimulated anoxic-preferring",
+                "Warming-stimulated oxic-preferring", "Warming-inhibited",
+                "Amino acids and derivatives", "Phenolic and polyphenolic compounds",
+                "Lipids and derivatives", "Other organic compounds")
+g_net <- set_vertex_attr(g_net, "group",        value = factor(node_group, levels = all_levels))
+g_net <- set_vertex_attr(g_net, "node_type",    value = node_type)
+g_net <- set_vertex_attr(g_net, "display_name", value = display_name)
+g_net <- set_vertex_attr(g_net, "shape_group",  value = dplyr::case_when(
+  vn %in% fermenter_ids ~ "Fermenter MAG", vn %in% all_MAGs ~ "MAG", TRUE ~ "Metabolite"))
+print(table(node_group, useNA = "always"))
+
+# Tripartite layout: genomes left, metabolites centre, methanogens right.
+#
+# The columns are pushed further apart than the node spacing needs, to open a
+# gutter between the metabolite column and the methanogen column for the
+# compound-name boxes. X_LABEL_RIGHT is the right edge every metabolite label
+# is aligned to; the labels are right-justified there and grow leftward, so
+# their right edges form a straight line whatever the name length.
+X_MAG        <- -6
+X_METAB      <-  0
+X_METHANOGEN <-  6
+X_LABEL_RIGHT <- 5.1     # right edge of the compound-name boxes
+X_MAG_LABEL   <- -6.4    # MAG labels sit left of their column, right-aligned
+X_METH_LABEL  <-  6.4    # methanogen labels sit right of theirs, left-aligned
+
+# The metabolite column sets the vertical scale, because it has the most nodes
+# and its labels are the two-line ones. METAB_ROW_GAP has to clear the height of
+# a two-line box or the grey boxes overlap; it is the number to change if they
+# ever do. The other two columns are then spread over the same total height, so
+# the panel has no dead space and the MAG labels are not crowded.
+METAB_ROW_GAP <- 2.1
+y_half <- 0.5 * METAB_ROW_GAP * (sum(node_type == "Metabolite") - 1)
+
+layout_mat <- matrix(NA_real_, nrow = vcount(g_net), ncol = 2, dimnames = list(vn, NULL))
+for (grp in list(list(v = vn[node_type == "MAG" & !(vn %in% methanogens)], x = X_MAG),
+                 list(v = vn[node_type == "Metabolite"],                   x = X_METAB),
+                 list(v = vn[vn %in% methanogens],                         x = X_METHANOGEN))) {
+  n <- length(grp$v)
+  layout_mat[grp$v, 1] <- grp$x
+  layout_mat[grp$v, 2] <- if (n == 1) 0 else seq(-y_half, y_half, length.out = n)
+}
+
+# Label frames, built off the same layout so a label can never drift from its
+# node. Kept out of the graph object because their x is fixed by column, not by
+# the node position, which is what makes the right edges line up.
+lab_df <- data.frame(name = vn, y = layout_mat[vn, 2], label = display_name,
+                     stringsAsFactors = FALSE)
+lab_metab <- lab_df[node_type == "Metabolite", ]
+lab_mag   <- lab_df[node_type == "MAG" & !(vn %in% methanogens), ]
+lab_meth  <- lab_df[vn %in% methanogens, ]
+
+node_colors <- c(
+  "Methanogen" = "#D740F2", "Warming-stimulated anoxic-preferring" = "#CA9F01",
+  "Warming-stimulated oxic-preferring" = "#538F6B", "Warming-inhibited" = "#0066CC",
+  "Amino acids and derivatives" = "#E07040",
+  "Phenolic and polyphenolic compounds" = "#7B3030",
+  "Lipids and derivatives" = "#B8964A", "Other organic compounds" = "#999999")
+
+FIG3 <- ggraph(g_net, layout = layout_mat[vn, ]) +
+  geom_edge_link(aes(color = color), alpha = 0.6, width = 1.2) +
+  scale_edge_color_identity() +
+  geom_node_point(data = \(x) x[x$node_type == "Metabolite", ],
+                  aes(fill = group, colour = shape_group), shape = 24, size = 5, stroke = 0.5) +
+  geom_node_point(data = \(x) x[x$node_type == "MAG" & !(x$name %in% fermenter_ids), ],
+                  aes(fill = group, colour = shape_group), shape = 21, size = 8, stroke = 0.8) +
+  geom_node_point(data = \(x) x[x$node_type == "MAG" & x$name %in% fermenter_ids, ],
+                  aes(fill = group, colour = shape_group), shape = 22, size = 8, stroke = 0.8) +
+  scale_fill_manual(values = node_colors, breaks = all_levels[1:4],
+    name = "Genome classification",
+    guide = guide_legend(order = 1, nrow = 2,
+      override.aes = list(shape = 21, size = 4, stroke = 0.8, color = "black"))) +
+  # Compound names: grey box, placed in the gutter to the right of the
+  # metabolite column, right-justified at X_LABEL_RIGHT so every box ends on the
+  # same vertical line. The box is opaque so a name stays legible where an edge
+  # runs under it. inherit.aes = FALSE keeps these off the node aesthetics.
+  geom_label(data = lab_metab, inherit.aes = FALSE,
+             aes(x = X_LABEL_RIGHT, y = y, label = label),
+             hjust = 1, vjust = 0.5, size = 3.2, lineheight = 0.95,
+             colour = "grey15", fill = "grey90", alpha = 1,
+             label.size = 0, label.r = unit(0.06, "lines"),
+             label.padding = unit(0.16, "lines")) +
+  # A leader from each metabolite node to its box, so a reader can follow a name
+  # back to its triangle across the gutter.
+  geom_segment(data = lab_metab, inherit.aes = FALSE,
+               aes(x = X_METAB + 0.12, xend = X_LABEL_RIGHT, y = y, yend = y),
+               colour = "grey75", linewidth = 0.2, linetype = "dotted") +
+  # MAGs and methanogens keep plain text, outside their own columns, so nothing
+  # competes with the compound-name gutter.
+  geom_text(data = lab_mag, inherit.aes = FALSE,
+            aes(x = X_MAG_LABEL, y = y, label = label),
+            hjust = 1, size = 3.4, colour = "grey15") +
+  geom_text(data = lab_meth, inherit.aes = FALSE,
+            aes(x = X_METH_LABEL, y = y, label = label),
+            hjust = 0, size = 3.4, colour = "grey15") +
+  scale_colour_manual(values = c(MAG = "black", `Fermenter MAG` = "black", Metabolite = "black"),
+    name = "Node shape",
+    guide = guide_legend(order = 2, override.aes = list(
+      shape = c(21, 22, 24), size = c(4, 4, 3), fill = "grey60", stroke = 0.8, linetype = 0))) +
+  # The label gutter and the two outer text columns sit outside the node
+  # coordinates, so the panel has to be told to make room for them.
+  coord_cartesian(xlim = c(X_MAG_LABEL - 4.2, X_METH_LABEL + 4.2), clip = "off") +
+  theme_void() + theme(legend.position = "bottom",
+                       plot.margin = margin(6, 6, 6, 6))
+save_fig(FIG3, p_net("Figure_3_network.pdf"), height = 14, width = 14)
+save_fig(FIG3, p_fig("Figure_3_network.pdf"), height = 14, width = 14)
+
+# ---- Supplementary Data 10 ----------------------------------------------------
+
+# Each row is a genome-metabolite-methanogen path, so it spans two edges and
+# carries two recovery frequencies. Edge keys are built the same way as in
+# edge_stability above: the node pair sorted alphabetically and "|"-separated,
+# so the join is on feature IDs and never on display names.
+edge_key <- function(a, b) purrr::map2_chr(a, b, \(x, y) paste(sort(c(x, y)), collapse = "|"))
+
+# What Figure 3 prints on each metabolite node, keyed on the feature ID. Carried
+# into Supplementary Data 10 so that a claim in the Results can be traced from the
+# figure label to the candidate name, the MSI level and the two edge recoveries
+# without joining anything by hand.
+fig3_label <- setNames(gsub("\n", " | ", metab_display[is_metab]), vn[is_metab])
+
+Suppl_Data_10 <- connections_df |>
+  mutate(connected_sensitive_tax = unname(mag_lookup[genome]),
+         connected_methanogen    = methanogen,
+         Metabolite_feature_ID   = metabolite,
+         Metabolite_name         = unname(metab_lookup[metabolite]),
+         Figure_3_label          = unname(fig3_label[metabolite]),
+         key_genome_metab        = edge_key(genome,     metabolite),
+         key_metab_methanogen    = edge_key(metabolite, methanogen)) |>
+  left_join(dplyr::select(df_metab, metabolite, Kingdom, Superclass,
+                          Class.metab = Class, Subclass, starts_with("Parent.Level")),
+            by = "metabolite") |>
+  # Mode, RT, m/z, MSI level and name multiplicity, so the network table carries
+  # the same annotation bookkeeping as Supplementary Data 3 and 4.
+  left_join(dplyr::select(taxdf_met, metabolite = feature, Acquisition_mode,
+                          RT_min, precursor_mz, Annotation_Confidence,
+                          Name_n_features, Name_status),
+            by = "metabolite") |>
+  left_join(dplyr::select(edge_stability,
+                          key_genome_metab      = edge,
+                          recovery_genome_metab = recovery_frequency),
+            by = "key_genome_metab") |>
+  left_join(dplyr::select(edge_stability,
+                          key_metab_methanogen      = edge,
+                          recovery_metab_methanogen = recovery_frequency),
+            by = "key_metab_methanogen") |>
+  mutate(Classification_network  = classify_metab(Superclass),
+         edge_genome_metab       = sign_genome_metab,
+         edge_metab_methanogen   = sign_metab_methanogen,
+         weight_genome_metab     = round(weight_genome_metab, 4),
+         weight_metab_methanogen = round(weight_metab_methanogen, 4)) |>
+  dplyr::select(connected_sensitive_tax, connected_methanogen,
+                Metabolite_feature_ID, Acquisition_mode, RT_min, precursor_mz,
+                Metabolite_name, Figure_3_label, Annotation_Confidence,
+                Name_n_features, Name_status,
+                Kingdom, Superclass, Class.metab, Subclass, starts_with("Parent.Level"),
+                Classification_network,
+                edge_genome_metab,     weight_genome_metab,     recovery_genome_metab,
+                edge_metab_methanogen, weight_metab_methanogen, recovery_metab_methanogen) |>
+  mutate(across(where(is.character), \(x) na_if(x, ""))) |>
+  arrange(connected_sensitive_tax, connected_methanogen, Metabolite_name)
+
+# Every path edge must appear in edge_stability. An NA here means the Figure 3
+# edge set and the resampling run have diverged, which the setequal guard above
+# should already have caught.
+if (anyNA(Suppl_Data_10$recovery_genome_metab) ||
+    anyNA(Suppl_Data_10$recovery_metab_methanogen))
+  stop("Supplementary Data 10: ",
+       sum(is.na(Suppl_Data_10$recovery_genome_metab)), " genome-metabolite and ",
+       sum(is.na(Suppl_Data_10$recovery_metab_methanogen)), " metabolite-methanogen ",
+       "edge(s) have no recovery frequency. Rerun the resampling chunk.")
+
+cat(sprintf("  Supplementary Data 10: %d paths, %d edge recovery values joined\n",
+            nrow(Suppl_Data_10), 2 * nrow(Suppl_Data_10)))
+
+write_out(Suppl_Data_10, p_net("Suppl_Data_10_linked_metabolites.csv"), na = "NA")
+write_out(Suppl_Data_10, p_sd("Suppl_Data_10_linked_metabolites.csv"),  na = "NA")
+
+# Network summary numbers quoted in the text and the Figure 3 legend.
+fig3_summary <- data.frame(
+    stars_stability      = getStability(se_FULL),
+    edges_full           = sum(getRefit(se_FULL)) / 2,
+    degree_threshold     = DEGREE_THRESHOLD,
+    abundance_quantile   = ABUND_QUANTILE,
+    n_MAGs_input         = ncol(mag_mat),
+    n_metabolites_input  = ncol(met_mat),
+    n_samples            = nrow(mag_mat),
+    fig3_nodes           = vcount(g_net),
+    fig3_edges           = ecount(g_net),
+    n_connections        = nrow(connections_df),
+    fig3_metabolites     = sum(is_metab),
+    fig3_metab_named     = sum(is_metab & !reclass),
+    fig3_metab_by_class  = sum(reclass),
+    fig3_metab_L1        = sum(is_metab & msi_tag == "L1"),
+    fig3_metab_L2        = sum(is_metab & msi_tag == "L2"),
+    fig3_metab_L3        = sum(is_metab & msi_tag == "L3"),
+    fig3_metab_L4        = sum(is_metab & msi_tag == "L4"),
+    edge_recovery_median = median(edge_stability$recovery_frequency),
+    edge_recovery_min    = min(edge_stability$recovery_frequency),
+    edge_recovery_max    = max(edge_stability$recovery_frequency),
+    resample_replicates  = RESAMPLE_N)
+print(t(fig3_summary))
+```
+
+`Check_Fig3_edge_stability.csv` is produced by `resample_edge_recovery()`, defined
+in `network-build` and called from `network-graph` whenever the stored file does
+not describe the edge set actually plotted. It is not a separate chunk any more:
+keeping the resampling code in one place is what stops the recovery frequencies
+and the figure describing different graphs. The result is written back into
+`00_inputs/` so that `WIPE_OUTPUTS` cannot delete it, and is reused on subsequent
+knits for as long as the edge set is unchanged.
+
+## 6. GENE-LEVEL RESULTS — Figure 4, Supplementary Figures S5, S6 and S7
+
+Predictor names are used exactly as the Maaslin2 objects store them,
+`AvgTemp10cm` and `WT_drawdown_cm`.
+
+```{r gene-level-setup}
+
+TEMP_GENE <- "AvgTemp10cm"
+WT_GENE   <- "WT_drawdown_cm"
+
+# Maaslin2 takes its feature names from taxa_names(); every join below is on the
+# Gene column of the tax table. They have to be the same vector.
+if (!identical(taxa_names(Genes_withMAG_NORMALIZED),
+               unname(as.character(tax_table(Genes_withMAG_NORMALIZED)[, "Gene"]))))
+  stop("taxa_names() and the Gene column of the gene tax table are not the same ",
+       "vector. Every gene-level join below is on Gene and would return NA ",
+       "annotations.")
+
+subset_genes <- function(ids, camper_only = TRUE) {
+  ps <- prune_taxa(rownames(tax_table(Genes_withMAG_NORMALIZED))[
+    tax_table(Genes_withMAG_NORMALIZED)[, "SPRUCE_ID"] %in% ids], Genes_withMAG_NORMALIZED)
+  if (camper_only) ps <- subset_taxa(ps, CAMPER_id != "" & !is.na(CAMPER_id))
+  ps
+}
+```
+
+```{r fig-s-cytochrome, fig.width=9, fig.height=3}
+
+# --- Supplementary Figure S5 and Supplementary Data 9 -------------------------
+
+Thermo_ox.genes.ps <- subset_genes(WSOX_IDS, camper_only = FALSE)
+tax_ox_all <- data.frame(tax_table(Thermo_ox.genes.ps))
+target_cyt <- rownames(tax_ox_all)[grep("cytochrome c", tax_ox_all$pfam_hits,
+                                        ignore.case = TRUE)]
+cat("Cytochrome c genes in WS-OX genomes:", length(target_cyt), "\n")
+
+if (REFIT_MAASLIN) {
+  fit_maaslin(prune_taxa(target_cyt, Thermo_ox.genes.ps), "RE_Thermo_cytochrome",
+              fixed = c("AvgTemp10cm", "WT_drawdown_cm"), random = "Plot")
+}
+
+Suppl_Data_09 <- readRDS(maaslin_path("RE_Thermo_cytochrome.rds"))$results |>
+  dplyr::rename(Gene = 1) |>
+  add_effect_size() |>
+  left_join(tax_ox_all, by = "Gene") |>
+  filter(metadata == TEMP_GENE) |>
+  arrange(pval)
+write_out(Suppl_Data_09, p_sd("Suppl_Data_09_cytochrome_c_temperature.csv"))
+
+df_Thermo_ox4 <- prune_taxa(target_cyt, Thermo_ox.genes.ps) |>
+  psmelt_with_camper() |>
+  mutate(WT_drawdown_cm = WT_drawdown * 100) |>
+  group_by(SPRUCE_ID, CAMPER_gene_description, Year, AvgTemp10cm,
+           WT_drawdown_cm, Warming_Treatment.ord) |>
+  dplyr::summarise(mean_Abundance = mean(Abundance, na.rm = TRUE), .groups = "drop") |>
+  mutate(Year = as.factor(Year))
+
+save_fig(
+  ggplot(df_Thermo_ox4, aes(x = AvgTemp10cm, y = mean_Abundance)) +
+    geom_point(aes(fill = SPRUCE_ID, shape = Year), colour = "black", size = 5, alpha = 0.8) +
+    geom_smooth(method = "lm", color = "black", linetype = "dashed", linewidth = 1, se = FALSE) +
+    facet_wrap(~CAMPER_gene_description, scales = "free_y", ncol = 3) +
+    scale_fill_manual(values = scico(length(unique(df_Thermo_ox4$SPRUCE_ID)), palette = "bamako")) +
+    scale_shape_manual(values = c(21, 22, 24)) +
+    guides(fill = guide_legend("Genome", override.aes = list(shape = 21))) +
+    xlab("Temperature (ºC, May-Aug)") +
+    ylab("Relative activity of gene\n(TAD80/ribosomal expression)") +
+    theme_bw() +
+    theme(legend.position = "right", axis.text = element_text(size = 12),
+          axis.title = element_text(size = 16), strip.text = element_text(size = 12),
+          strip.background = element_blank()),
+  p_fig("Figure_S5_cytochrome_c.pdf"), height = 3, width = 9)
+```
+
+```{r fig4, fig.width=8, fig.height=4}
+
+# --- Figure 4: phenol-active gene responses in WS-OX and WS-AN genomes --------
+
+read_gene_maaslin <- function(rds, ps) {
+  tax <- data.frame(tax_table(ps))
+  stopifnot("Gene" %in% names(tax))
+  readRDS(rds)$results |>
+    dplyr::rename(Gene = 1) |>
+    add_effect_size() |>
+    left_join(tax, by = "Gene")
+}
+
+ps_ox <- subset_genes(WSOX_IDS)
+ps_an <- subset_genes(WSAN_IDS)
+if (REFIT_MAASLIN) {
+  fit_maaslin(ps_ox, "RE_Thermo_CAMPERgenes",     c("AvgTemp10cm", "WT_drawdown_cm"), "Plot")
+  fit_maaslin(ps_an, "RE_ThermoANOX_CAMPERgenes", c("AvgTemp10cm", "WT_drawdown_cm"), "Plot")
+}
+df_Coef_Therm <- read_gene_maaslin(maaslin_path("RE_Thermo_CAMPERgenes.rds"),     ps_ox)
+df_Coef_AN    <- read_gene_maaslin(maaslin_path("RE_ThermoANOX_CAMPERgenes.rds"), ps_an)
+stopifnot(all(c(TEMP_GENE, WT_GENE) %in% df_Coef_Therm$metadata),
+          all(c(TEMP_GENE, WT_GENE) %in% df_Coef_AN$metadata))
+
+# Genes moving in one direction, per genome, per oxygen class, per predictor.
+# The grid is built explicitly so a genome with no significant genes sits at (0, 0).
+count_gene_responses <- function(df, direction = c("up", "down"), genomes = NULL) {
+  direction <- match.arg(direction)
+  grid <- expand.grid(
+    SPRUCE_ID     = if (is.null(genomes)) sort(unique(df$SPRUCE_ID)) else sort(genomes),
+    metadata      = sort(unique(df$metadata)),
+    CAMPER_oxygen = c("oxic", "anoxic"),
+    stringsAsFactors = FALSE)
+  df |>
+    filter(pval < 0.05, if (direction == "up") coef > 0 else coef < 0,
+           CAMPER_oxygen %in% c("oxic", "anoxic")) |>
+    count(SPRUCE_ID, metadata, CAMPER_oxygen, name = "n_genes") |>
+    right_join(grid, by = c("SPRUCE_ID", "metadata", "CAMPER_oxygen")) |>
+    mutate(n_genes = tidyr::replace_na(n_genes, 0L)) |>
+    tidyr::pivot_wider(names_from = CAMPER_oxygen, values_from = n_genes,
+                       names_prefix = "genes_")
+}
+
+camper_scatter <- function(df, title, colors, axis_prefix, legend_pos = "none") {
+  ggplot(df, aes(x = genes_oxic, y = genes_anoxic)) +
+    geom_point(aes(fill = taxonomy), colour = "black", pch = 21, size = 5) +
+    scale_fill_manual(values = colors) +
+    scale_x_continuous(breaks = scales::breaks_pretty()) +
+    scale_y_continuous(breaks = scales::breaks_pretty()) +
+    guides(fill = guide_legend("Genome", override.aes = list(shape = 21))) +
+    xlab(paste0("Oxygen-dependent genes\n", axis_prefix)) +
+    ylab(paste0("Oxygen-independent genes\n", axis_prefix)) +
+    ggtitle(title) + theme_bw() +
+    theme(legend.position = legend_pos, axis.text = element_text(size = 16),
+          axis.title = element_text(size = 16))
+}
+
+add_taxonomy <- function(counts, tax) {
+  counts |>
+    left_join(distinct(dplyr::select(tax, SPRUCE_ID, Phylum, Genus)), by = "SPRUCE_ID") |>
+    mutate(taxonomy = paste0(SPRUCE_ID, ": ", Phylum,
+                             ifelse(Genus == "" | is.na(Genus), "", paste0(" g__", Genus))))
+}
+
+FIG4B_GENOMES <- c("SPRUCE 124", "SPRUCE 2057", "SPRUCE 2060", "SPRUCE 2148",
+                   "SPRUCE 2155", "SPRUCE 2191", "SPRUCE 275")
+if (length(setdiff(FIG4B_GENOMES, df_Coef_AN$SPRUCE_ID)))
+  warning("Figure 4B genomes absent from the WS-AN results: ",
+          paste(setdiff(FIG4B_GENOMES, df_Coef_AN$SPRUCE_ID), collapse = ", "))
+
+genes_df_OX <- add_taxonomy(count_gene_responses(df_Coef_Therm, "up", WSOX_IDS),
+                            data.frame(tax_table(ps_ox)))
+genes_df_AN <- add_taxonomy(count_gene_responses(df_Coef_AN, "up", FIG4B_GENOMES),
+                            data.frame(tax_table(ps_an)))
+
+green   <- scico(max(7, n_distinct(genes_df_OX$taxonomy)), palette = "bamako")
+yellows <- c("#663329","#A54543","#D85F4D","#E48751","#ECAC54","#F7D971","#FFFECB")
+
+fig4a_A <- camper_scatter(filter(genes_df_OX, metadata == WT_GENE),   "Water table drawdown", green, "increasing")
+fig4a_B <- camper_scatter(filter(genes_df_OX, metadata == TEMP_GENE), "Temperature",          green, "increasing", "right")
+save_legend(fig4a_B, legend_path(p_fig("Figure_4A_WSOX_phenolic_genes.pdf")), width = 3.5, height = 5)
+save_fig(ggarrange(fig4a_A, fig4a_B + theme(legend.position = "none"),
+    ncol = 2, labels = c("A","B"), font.label = list(size = 18)),
+  p_fig("Figure_4A_WSOX_phenolic_genes.pdf"), width = 8, height = 4)
+
+fig4b_A <- camper_scatter(filter(genes_df_AN, metadata == WT_GENE),   "Water table drawdown", yellows, "increasing")
+fig4b_B <- camper_scatter(filter(genes_df_AN, metadata == TEMP_GENE), "Temperature",          yellows, "increasing", "right")
+save_legend(fig4b_B, legend_path(p_fig("Figure_4B_WSAN_phenolic_genes.pdf")), width = 3.5, height = 5)
+save_fig(ggarrange(fig4b_A, fig4b_B + theme(legend.position = "none"),
+    ncol = 2, labels = c("A","B"), font.label = list(size = 18)),
+  p_fig("Figure_4B_WSAN_phenolic_genes.pdf"), width = 8, height = 4)
+
+# Gene counts quoted in the Results.
+cat("\nWS-OX upregulated phenol-active genes by predictor:\n")
+print(genes_df_OX |> group_by(metadata) |>
+        summarise(total = sum(genes_oxic + genes_anoxic), .groups = "drop"))
+cat("WS-OX downregulated:\n")
+print(count_gene_responses(df_Coef_Therm, "down", WSOX_IDS) |> group_by(metadata) |>
+        summarise(total = sum(genes_oxic + genes_anoxic), .groups = "drop"))
+cat("WS-AN upregulated:\n")
+print(genes_df_AN |> group_by(metadata) |>
+        summarise(total = sum(genes_oxic + genes_anoxic), .groups = "drop"))
+
+# Supplementary Data 12 and 13: the gene-level tables behind Figure 4.
+write_out(filter(df_Coef_Therm, pval < 0.05) |> arrange(metadata, pval),
+          p_sd("Suppl_Data_12_WSOX_CAMPER_genes.csv"))
+write_out(filter(df_Coef_AN,    pval < 0.05) |> arrange(metadata, pval),
+          p_sd("Suppl_Data_13_WSAN_CAMPER_genes.csv"))
+
+# --- Supplementary Data 11: hydrogenases in WS-AN genomes, HydDB annotated ---
+
+ps_an_hyd <- prune_taxa(
+  rownames(tax_table(load_hyddb_ps()))[
+    tax_table(load_hyddb_ps())[, "SPRUCE_ID"] %in% WSAN_IDS],
+  load_hyddb_ps())
+if (REFIT_MAASLIN) {
+  fit_maaslin(ps_an_hyd, "RE_ThermoANOX_hydrogenases",
+              fixed = c("AvgTemp10cm", "WT_drawdown_cm"), random = "Plot")
+}
+
+tax_an_hyd <- data.frame(tax_table(ps_an_hyd))
+hyd_cols   <- grep("^HydDB", names(tax_an_hyd), value = TRUE)
+if (!length(hyd_cols))
+  warning("No HydDB columns in ", HYDDB_PS_FILE,
+          ". Supplementary Data 11 will have no hydrogenase annotation.")
+
+Suppl_Data_11 <- readRDS(maaslin_path("RE_ThermoANOX_hydrogenases.rds"))$results |>
+  dplyr::rename(Gene = 1) |>
+  add_effect_size() |>
+  left_join(tax_an_hyd, by = "Gene") |>
+  filter(pval < 0.05,
+         if (length(hyd_cols)) !is.na(.data[[hyd_cols[1]]]) & .data[[hyd_cols[1]]] != ""
+         else grepl("hydrogenase", kegg_hit, ignore.case = TRUE)) |>
+  arrange(metadata, pval)
+write_out(Suppl_Data_11, p_sd("Suppl_Data_11_hydrogenases_HydDB.csv"))
+```
+
+```{r fig-s-aminocarb, fig.width=12, fig.height=15}
+
+# --- Supplementary Figures S6 and S7 ------------------------------------------
+
+Select_taxa <- read.csv(net_path("Linking_Metabolites_INFO.csv")) |>
+  pull(genome) |> unique() |> setdiff(c("SPRUCE 190", "SPRUCE 689"))
+# Three genes, each in a pathway enriched in Figure 5: K00382 (dihydrolipoyl
+# dehydrogenase, branched-chain amino acid degradation), K01915 (glutamine
+# synthetase, alanine/aspartate/glutamate metabolism) and K00873 (pyruvate
+# kinase, glycolysis, pyruvate metabolism and carbon metabolism).
+target_ko <- c("K00382", "K01915", "K00873")   # dihydrolipoamide DH, GlnA, pyruvate kinase
+
+subset_data_df_plot <- subset_genes(Select_taxa, camper_only = FALSE) |>
+  psmelt_with_camper() |>
+  filter(ko_id %in% target_ko) |>
+  group_by(SPRUCE_ID, ko_id, pfam_hits, Phylum, Genus, Year, AvgTemp10cm,
+           Temp_avg_top, WT_drawdown, Warming_Treatment.ord) |>
+  dplyr::summarise(mean_Abundance = mean(Abundance, na.rm = TRUE), .groups = "drop") |>
+  mutate(taxonomy = paste0(SPRUCE_ID, ": ", Phylum, " g__", Genus), Year = as.factor(Year))
+
+colors_aminocarb <- c("#663329","#A54543","#D85F4D","#E48751","#ECAC54","#F7D971","#FFFECB",
+                       "#003A46","#15483A","#355E26","#988C02","#D0B74B","#FFE5AC","#C5DBA0")
+
+save_fig(
+  merge(expand.grid(taxonomy = unique(subset_data_df_plot$taxonomy), ko_id = target_ko),
+        subset_data_df_plot, by = c("taxonomy","ko_id"), all.x = TRUE) |>
+    ggplot(aes(x = AvgTemp10cm, y = mean_Abundance)) +
+    geom_point(aes(fill = taxonomy, shape = Year), colour = "black", size = 5, alpha = 0.8) +
+    facet_wrap(~taxonomy + ko_id, scales = "free_y", ncol = 3) +
+    scale_fill_manual(values = colors_aminocarb) +
+    scale_shape_manual(values = c(21, 22, 24)) +
+    xlab("Temperature (ºC, May-Aug)") +
+    ylab("Relative activity of gene\n(TAD80/ribosomal expression)") +
+    theme_bw() +
+    theme(legend.position = "none", axis.text = element_text(size = 12),
+          axis.title = element_text(size = 16), strip.text = element_blank(),
+          strip.background = element_blank()),
+  p_fig("Figure_S6_central_metabolism_genes.pdf"), height = 15, width = 12)
+
+compound_class <- data.frame(tax_table(metabolites_phylo))
+
+# Three panels: peptides, free amino acids, carbohydrates. ClassyFire files
+# peptides and free amino acids together under the class "Carboxylic acids and
+# derivatives", so grouping by Class would merge the first two panels. The split
+# is taken at Parent.Level.1, matching the class-level tests in section 2.9.5,
+# and the panels are ordered so the peptide result and the free amino acid null
+# sit next to each other.
+if (!all(c("Parent.Level.1", "Subclass") %in% names(compound_class)))
+  stop("The metabolite tax table needs Parent.Level.1 and Subclass to build the ",
+       "peptide, amino acid and carbohydrate panels of Supplementary Figure S7.")
+compound_class$Metab_set <- dplyr::case_when(
+  compound_class$Parent.Level.1 %in% "Peptides"                            ~ "Peptides",
+  compound_class$Parent.Level.1 %in% "Amino acids and derivatives"         ~ "Amino acids",
+  compound_class$Subclass %in% "Carbohydrates and carbohydrate conjugates" ~ "Carbohydrates",
+  TRUE                                                                     ~ NA_character_)
+cat("\nSupplementary Figure S7 features: peptides",
+    sum(compound_class$Metab_set %in% "Peptides"),
+    "| amino acids", sum(compound_class$Metab_set %in% "Amino acids"),
+    "| carbohydrates", sum(compound_class$Metab_set %in% "Carbohydrates"), "\n")
+
+amino_carb_summary <- {
+  met_norm <- sample_matrix(metabolites_phylo)
+  met_norm <- met_norm / rowMeans(met_norm, na.rm = TRUE)
+  met_norm$SampleID <- rownames(met_norm)
+  met_norm
+} |>
+  left_join(data.frame(sample_data(metabolites_phylo)) |>
+              dplyr::select(SampleID = Sample, AvgTemp10cm, Warming_Treatment.ord,
+                            Year, WT_drawdown_cm),
+            by = "SampleID") |>
+  pivot_longer(cols = -c(SampleID, AvgTemp10cm, Warming_Treatment.ord, Year, WT_drawdown_cm),
+               names_to = "Feature", values_to = "NormalizedIntensity") |>
+  inner_join(filter(compound_class, !is.na(Metab_set)), by = "Feature") |>
+  group_by(SampleID, AvgTemp10cm, Warming_Treatment.ord, Year, WT_drawdown_cm, Metab_set) |>
+  dplyr::summarise(MeanIntensity = mean(NormalizedIntensity, na.rm = TRUE), .groups = "drop") |>
+  mutate(Metab_set = factor(Metab_set,
+                            levels = c("Peptides", "Amino acids", "Carbohydrates")),
+         Year      = as.factor(Year))
+
+if (nrow(amino_carb_summary) == 0)
+  stop("No peptide, amino acid or carbohydrate feature matched the tax table. ",
+       "Check that make.names() has not altered the feature IDs.")
+if (dplyr::n_distinct(amino_carb_summary$Metab_set) != 3)
+  stop("Supplementary Figure S7 expects three panels; found: ",
+       paste(levels(droplevels(amino_carb_summary$Metab_set)), collapse = ", "))
+
+save_fig(
+  ggplot(amino_carb_summary, aes(x = AvgTemp10cm, y = MeanIntensity, shape = Year)) +
+    scale_shape_manual(values = c(21, 22, 24)) +
+    geom_point(aes(fill = Warming_Treatment.ord), size = 8, colour = "black") +
+    geom_smooth(aes(linetype = Year), method = "lm", se = FALSE, linewidth = 1, color = "black") +
+    facet_wrap(~Metab_set) +
+    scale_fill_manual(values = allGroupsColors) +
+    scale_linetype_manual(values = c("2020" = "solid","2021" = "dashed","2022" = "dotted")) +
+    guides(fill = guide_legend("Temperature\ntreatment", override.aes = list(shape = 21))) +
+    labs(x = "Temperature at 10 cm (May-Aug, °C)", y = "Mean Normalized Intensity") +
+    theme_bw() +
+    theme(legend.position = "right", axis.text = element_text(size = 12),
+          axis.title = element_text(size = 16), strip.text = element_text(size = 16),
+          strip.background = element_blank()),
+  p_fig("Figure_S7_peptide_amino_acid_carbohydrate.pdf"), width = 14, height = 5)
+
+aa_carb_models <- purrr::imap_dfr(
+  list("Peptides (set mean intensity)"                             = "Peptides",
+       "Amino acids, free, peptides excluded (set mean intensity)" = "Amino acids",
+       "Carbohydrates (set mean intensity)"                        = "Carbohydrates"),
+  \(cls, nm) {
+    m <- stats::step(lm(MeanIntensity ~ AvgTemp10cm * WT_drawdown_cm,
+                        data = filter(amino_carb_summary, Metab_set == cls)), trace = 0)
+    s <- summary(m)
+    data.frame(response = nm, formula = paste(deparse(formula(m)), collapse = " "),
+               term = rownames(s$coefficients), s$coefficients,
+               adj_R2 = s$adj.r.squared, n = nobs(m), row.names = NULL)
+  })
+# Printed as a cross-check only; the reported values come from the class-mean
+# mixed models above.
+print(aa_carb_models)
+```
+
+## 7. KEGG PATHWAY ENRICHMENT — Figure 5 (EXPLORATORY)
+
+Exploratory. The gene-level tests behind the query set are close to, or below,
+the 5% null expectation, and the chunk prints the counts it is based on.
+`universe` is the set of KO IDs detected in these genomes. Correction is `holm`,
+with BH reported alongside.
+
+```{r clusterprofiler-fig5, fig.width=10, fig.height=8}
+
+Select_taxa_net <- read.csv(net_path("Linking_Metabolites_INFO.csv")) |>
+  pull(genome) |> unique() |> setdiff(c("SPRUCE 190", "SPRUCE 689"))
+Thermo_ox_net.genes.ps <- subset_genes(Select_taxa_net, camper_only = FALSE)
+taxdf_net <- data.frame(tax_table(Thermo_ox_net.genes.ps))
+
+if (REFIT_MAASLIN && REFIT_LARGE) {
+  fit_maaslin(Thermo_ox_net.genes.ps, "RE_networked_ALL",
+              fixed = "AvgTemp10cm", random = "Plot")
+}
+MaAslinLM_net <- readRDS(maaslin_path("RE_networked_ALL.rds"))
+df_Coef_net   <- MaAslinLM_net$results |> dplyr::rename(Gene = 1) |>
+  add_effect_size() |> left_join(taxdf_net, by = "Gene")
+stopifnot(TEMP_GENE %in% df_Coef_net$metadata)
+
+n_tested <- nrow(filter(df_Coef_net, metadata == TEMP_GENE))
+n_p05    <- sum(df_Coef_net$metadata == TEMP_GENE & df_Coef_net$pval < 0.05, na.rm = TRUE)
+cat(sprintf("Gene-level: %d tested, %d at P<0.05 (%.1f%%, null expectation 5%%), min q = %.3f\n",
+            n_tested, n_p05, 100 * n_p05 / n_tested,
+            min(df_Coef_net$qval[df_Coef_net$metadata == TEMP_GENE], na.rm = TRUE)))
+
+df_ko <- df_Coef_net |>
+  filter(metadata == TEMP_GENE, !is.na(ko_id), !ko_id %in% c("", "NA")) |>
+  mutate(diffexpressed = case_when(coef > 0 & pval < 0.05 ~ "Warm",
+                                   coef < 0 & pval < 0.05 ~ "Ambient",
+                                   TRUE ~ "NO"))
+
+KO_UNIVERSE <- unique(df_ko$ko_id)
+cat("Background universe:", length(KO_UNIVERSE), "unique KO IDs\n")
+
+pathways   <- keggList("pathway", "ko")
+kegg_names <- data.frame(
+  ID          = sub("path:", "", names(pathways)),
+  Description = sub(" - Reference pathway", "", pathways),
+  stringsAsFactors = FALSE)
+TERM2GENE <- clusterProfiler::download_KEGG("ko")$KEGGPATHID2EXTID |>
+  dplyr::select(term = from, gene = to) |>
+  left_join(kegg_names, by = c("term" = "ID")) |>
+  mutate(term = Description) |>
+  dplyr::select(term, gene) |>
+  filter(!is.na(term))
+
+ora <- clusterProfiler::enricher(
+  gene          = df_ko$ko_id[df_ko$diffexpressed == "Warm"],
+  universe      = KO_UNIVERSE,
+  TERM2GENE     = TERM2GENE,
+  pAdjustMethod = "holm",
+  pvalueCutoff  = 1, qvalueCutoff = 1)
+
+if (is.null(ora) || nrow(ora@result) == 0)
+  stop("enricher() returned nothing. Check that ko_id values match TERM2GENE.")
+res_df <- ora@result |>
+  mutate(p_adjust_BH = p.adjust(pvalue, "BH"), p_adjust_holm = p.adjust(pvalue, "holm"))
+print(head(res_df[order(res_df$pvalue), c("ID","Description","Count","pvalue","p_adjust_BH","p_adjust_holm")], 20), row.names = FALSE)
+
+cat("Pathways at raw P<0.05 and >=10 genes:",
+    sum(res_df$pvalue < 0.05 & res_df$Count >= 10), "\n")
+cat("Surviving Holm P<0.05:", sum(res_df$p_adjust_holm < 0.05), "\n")
+cat("Surviving BH q<0.05:  ", sum(res_df$p_adjust_BH   < 0.05), "\n")
+
+res_df_filt <- filter(res_df, pvalue < 0.05, Count >= 10)
+
+if (nrow(res_df_filt) == 0) {
+  warning("No KEGG pathway passes the Figure 5 display filter.")
+} else {
+  FIG5 <- ggplot(arrange(res_df_filt, desc(Count)),
+                 aes(x = fct_reorder(Description, Count), y = Count, fill = pvalue)) +
+    geom_col() + coord_flip() +
+    scale_fill_gradient(name = "P-value", high = "#9ecae1", low = "#08306b") +
+    labs(x = "KEGG Pathway", y = "Number of genes with increased transcription",
+         caption = paste0("Exploratory. Query set defined at nominal P < 0.05; ",
+                          n_p05, "/", n_tested, " genes (",
+                          sprintf("%.1f%%", 100 * n_p05 / n_tested),
+                          ") reach that threshold, against a 5% null expectation.")) +
+    theme_bw() +
+    theme(axis.text = element_text(size = 12), axis.title = element_text(size = 16),
+          plot.caption = element_text(size = 9, hjust = 0))
+  save_fig(FIG5, p_fig("Figure_5_KEGG_enrichment.pdf"), height = 8, width = 10)
+}
+
+# --- Supplementary Data 14 ---------------------------------------------------
+Suppl_Data_14 <- arrange(df_Coef_net, metadata, pval)
+cat("Supplementary Data 14: ", nrow(Suppl_Data_14), " rows, ",
+    sum(Suppl_Data_14$pval < 0.05, na.rm = TRUE), " at P<0.05\n", sep = "")
+if (sum(Suppl_Data_14$pval < 0.05, na.rm = TRUE) == 0)
+  stop("Supplementary Data 14 contains no gene at P < 0.05.")
+write_out(Suppl_Data_14, p_sd("Suppl_Data_14_networked_genes.csv"))
+```
+
+## 8. CAMPER GENES, FULL COMMUNITY
+
+FDR census across the whole community. Not submitted as a numbered sheet.
+
+```{r maaslin-all-camper}
+
+if (REFIT_MAASLIN && REFIT_LARGE) {
+  fit_maaslin(subset_taxa(Genes_withMAG_NORMALIZED, CAMPER_id != "" & !is.na(CAMPER_id)),
+              "RE_ALL_CAMPERgenes",
+              fixed = c("AvgTemp10cm", "WT_drawdown_cm"), random = "Plot")
+}
+df_Coef_ALLCAMPER <- readRDS(maaslin_path("RE_ALL_CAMPERgenes.rds"))$results |>
+  dplyr::rename(Gene = 1) |> add_effect_size()
+print(fdr_summary(list(results = df_Coef_ALLCAMPER), "All CAMPER genes ~ Temp + WT + (1|Plot)"))
+```
+
+## 9. METHANOGEN ACTIVITY — Figure 6
+
+```{r methanogen, fig.width=12, fig.height=6}
+
+# --- Supplementary Figure S8 --------------------------------------------------
+
+matching_mcrA <- rownames(tax_table(Genes_withMAG_NORMALIZED))[
+  tax_table(Genes_withMAG_NORMALIZED)[, "ko_id"] %in% "K00399"]
+methanogen_gene_ps <- prune_taxa(
+  intersect(matching_mcrA, rownames(tax_table(subset_genes(METHANOGEN_IDS, FALSE)))),
+  Genes_withMAG_NORMALIZED)
+active_mcrA <- unique(data.frame(tax_table(methanogen_gene_ps))$SPRUCE_ID)
+cat("Methanogen MAGs expressing mcrA:", paste(active_mcrA, collapse = ", "), "\n")
+
+# --- Share of mcrA expression held by the four oxygen-sensitive methanogens ----
+# Denominator: every gene annotated K00399 in any MAG. Numerator: the K00399
+# genes in METHANOGEN_IDS. Abundance is ribosome-normalised gene activity.
+
+mcrA_all_ps <- prune_taxa(matching_mcrA, Genes_withMAG_NORMALIZED)
+
+mcrA_share <- psmelt(mcrA_all_ps) |>
+  dplyr::mutate(is_methanogen = SPRUCE_ID %in% METHANOGEN_IDS) |>
+  dplyr::group_by(SPRUCE_ID, is_methanogen) |>
+  dplyr::summarise(total_activity = sum(Abundance, na.rm = TRUE),
+                   n_genes        = dplyr::n_distinct(OTU),
+                   n_samples_nonzero = sum(Abundance > 0, na.rm = TRUE),
+                   .groups = "drop") |>
+  dplyr::arrange(dplyr::desc(total_activity)) |>
+  dplyr::mutate(pct_of_total = 100 * total_activity / sum(total_activity))
+
+MCRA_PCT_METHANOGENS <- sum(mcrA_share$pct_of_total[mcrA_share$is_methanogen])
+
+cat(sprintf(
+  "mcrA (K00399): %d genes across %d MAGs. The %d methanogen MAGs hold %.1f%% of total normalised mcrA activity.\n",
+  length(matching_mcrA), nrow(mcrA_share), sum(mcrA_share$is_methanogen),
+  MCRA_PCT_METHANOGENS))
+
+if (nrow(mcrA_share) > sum(mcrA_share$is_methanogen))
+  cat("  Non-methanogen MAGs carrying K00399: ",
+      paste(mcrA_share$SPRUCE_ID[!mcrA_share$is_methanogen], collapse = ", "), "\n", sep = "")
+
+print(as.data.frame(mcrA_share), digits = 3, row.names = FALSE)
+
+
+df_Meth_PW <- prune_taxa(taxa_names(droughtMAG.activity.ps) %in% active_mcrA,
+                         droughtMAG.activity.ps) |>
+  psmelt() |>
+  mutate(WT_drawdown_cm = WT_drawdown * 100, Year = as.factor(Year), Plot = as.factor(Plot)) |>
+  group_by(Warming, Year, Plot, AvgTemp10cm, Temp_avg_top, WT_drawdown_cm,
+           Warming_Treatment.ord) |>
+  dplyr::summarize(sum_Abundance = sum(Abundance, na.rm = TRUE), .groups = "drop") |>
+  left_join(dplyr::select(PWgas_sub, Year, Plot, CH4mM), by = c("Year", "Plot")) |>
+  filter(!is.na(CH4mM))
+
+model_meth_CH4 <- glmmTMB(CH4mM ~ sum_Abundance + (1 | Plot), family = gaussian(),
+                          data = df_Meth_PW)
+meth_fix <- drop_singular_re(model_meth_CH4, df_Meth_PW, "CH4 ~ methanogen activity")
+register_model(tidy_glmmtmb(meth_fix$model, "Porewater CH4 ~ total methanogen activity"))
+print(tidy_glmmtmb(meth_fix$model, "Porewater CH4 ~ total methanogen activity"))
+
+save_fig(
+  ggplot(df_Meth_PW, aes(x = sum_Abundance, y = CH4mM)) +
+    geom_point(aes(fill = Warming_Treatment.ord), colour = "black", size = 8, pch = 21) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed", linewidth = 1) +
+    scale_fill_manual(values = allGroupsColors) +
+    guides(fill = guide_legend("Temperature\ntreatment", override.aes = list(shape = 21))) +
+    xlab("Total relative activity of methanogens") + ylab("Porewater CH4 (mM)") +
+    theme_bw() +
+    theme(legend.position = "right", axis.text = element_text(size = 12),
+          axis.title = element_text(size = 16)),
+  p_fig("Figure_S8_methanogen_activity.pdf"), width = 8, height = 7)
+
+# --- Annual CH4 emission by year, Supplementary Data 1 and Figure S8C ---------
+# Modelled annual emission per enclosure from Cory et al. (2025). Restricted to
+# the ten study enclosures and the three sampled years, and fitted on the log
+# scale because emission spans more than an order of magnitude between enclosures.
+#
+# Temperature enters as a fixed effect. Warming is assigned per enclosure, so a
+# year-only model with (1|Plot) hides the whole warming gradient inside the
+# random intercept: enclosure variance falls from 0.46 to 0.05 once temperature
+# is fitted, meaning most of what separates enclosures is the treatment. The
+# year by temperature interaction is kept when the LRT supports it, as elsewhere.
+#
+# Year is referenced to 2021, the drought year, because the contrasts the text
+# discusses are the drop into 2021 and the recovery out of it. Referenced to 2020
+# the 2022 coefficient tests 2022 against 2020, which is not that comparison.
+
+CH4_flux_annual <- readr::read_csv(p_raw_req(CH4_FLUX_CSV), show_col_types = FALSE,
+                                   name_repair = "minimal") |>
+  rlang::set_names(c("Year", "Plot", "CH4_flux")) |>
+  dplyr::mutate(Year     = suppressWarnings(as.integer(Year)),
+                CH4_flux = suppressWarnings(as.numeric(CH4_flux)),
+                Plot     = suppressWarnings(as.integer(sub("^P0*", "", Plot)))) |>
+  dplyr::filter(!is.na(Year), !is.na(CH4_flux), !is.na(Plot),
+                Year %in% c(2020, 2021, 2022), Plot %in% STUDY_PLOTS) |>
+  dplyr::left_join(
+    # Plot and Year are factors in metadata_df, so they are taken back through
+    # as.character(); as.integer() on a factor returns the level index.
+    dplyr::select(metadata_df, Plot, Year, Temp_avg_top, WT_drawdown_cm) |>
+      dplyr::mutate(Plot = as.integer(as.character(Plot)),
+                    Year = as.integer(as.character(Year))) |>
+      dplyr::distinct(),
+    by = c("Plot", "Year")) |>
+  dplyr::mutate(Year          = factor(Year, levels = c(2021, 2020, 2022)),
+                Plot          = as.factor(Plot),
+                log_CH4_flux  = log(CH4_flux),
+                # Centred so that with the interaction in the model the Year
+                # coefficients are year contrasts at the mean temperature of the
+                # experiment rather than extrapolations to 0 degrees.
+                Temp_c        = Temp_avg_top - mean(Temp_avg_top))
+
+if (anyNA(CH4_flux_annual$Temp_avg_top))
+  stop("Temperature is missing for ", sum(is.na(CH4_flux_annual$Temp_avg_top)),
+       " enclosure-year(s) in the flux table.")
+if (nrow(CH4_flux_annual) != dplyr::n_distinct(CH4_flux_annual$Plot,
+                                               CH4_flux_annual$Year))
+  stop("The metadata join duplicated enclosure-years in the flux table.")
+
+cat(sprintf("Annual CH4 flux: %d enclosure-years across %d enclosures and %d years\n",
+            nrow(CH4_flux_annual), dplyr::n_distinct(CH4_flux_annual$Plot),
+            dplyr::n_distinct(CH4_flux_annual$Year)))
+print(CH4_flux_annual |>
+        dplyr::group_by(Year) |>
+        dplyr::summarise(n = dplyr::n(),
+                         median_flux = median(CH4_flux),
+                         .groups = "drop") |>
+        as.data.frame(), row.names = FALSE)
+
+FLUX_LABEL <- "Annual CH4 flux ~ year x temperature (log scale)"
+flux_lrt <- lrt_interaction(log_CH4_flux ~ Year * Temp_c + (1 | Plot),
+                            log_CH4_flux ~ Year + Temp_c + (1 | Plot),
+                            CH4_flux_annual, label = "Annual CH4 flux")
+cat("Mean temperature used for centring: ",
+    round(mean(CH4_flux_annual$Temp_avg_top), 2), " C\n", sep = "")
+flux_fix <- drop_singular_re(flux_lrt$model, CH4_flux_annual, FLUX_LABEL)
+register_model(tidy_glmmtmb(flux_fix$model, FLUX_LABEL))
+print(tidy_glmmtmb(flux_fix$model, FLUX_LABEL))
+
+# Year-only fit, kept as a reference point for how much of the between-enclosure
+# variation the warming treatment accounts for.
+flux_yearonly <- glmmTMB(log_CH4_flux ~ Year + (1 | Plot), family = gaussian(),
+                         data = CH4_flux_annual)
+cat("Enclosure SD, year only: ",
+    signif(attr(VarCorr(flux_yearonly)$cond$Plot, "stddev")[1], 3),
+    " | with temperature: ",
+    signif(tryCatch(attr(VarCorr(flux_fix$model)$cond$Plot, "stddev")[1],
+                    error = function(e) NA_real_), 3), "\n", sep = "")
+
+# Back-transform each year contrast to a percentage change against 2021, the
+# drought year, evaluated at the mean temperature of the experiment.
+flux_coefs <- as.data.frame(summary(flux_fix$model)$coefficients$cond)
+colnames(flux_coefs) <- c("Estimate", "Std_Error", "z_value", "p_value")
+flux_coefs$term <- rownames(flux_coefs)
+for (yr in grep("^Year", flux_coefs$term, value = TRUE))
+  cat(sprintf("  %s: %+.1f%% relative to 2021 (P = %.3g)\n", yr,
+              100 * (exp(flux_coefs$Estimate[flux_coefs$term == yr]) - 1),
+              flux_coefs$p_value[flux_coefs$term == yr]))
+
+# --- Unadjusted year-to-year contrasts, paired within enclosure ---------------
+# The model above compares years at a common temperature. Ambient temperature
+# also differed between years, so the two questions have different answers and
+# the manuscript states both. These are the raw contrasts: each enclosure is its
+# own control, which is the right pairing for a balanced 10 x 3 design and does
+# not pool one residual variance across the drought year and the wet years.
+
+flux_wide <- CH4_flux_annual |>
+  dplyr::select(Plot, Year, log_CH4_flux) |>
+  tidyr::pivot_wider(names_from = Year, values_from = log_CH4_flux,
+                     names_prefix = "y")
+temp_wide <- CH4_flux_annual |>
+  dplyr::select(Plot, Year, Temp_avg_top) |>
+  tidyr::pivot_wider(names_from = Year, values_from = Temp_avg_top,
+                     names_prefix = "y")
+
+flux_year_contrasts <- purrr::map_dfr(
+  list(c("y2020", "y2021"), c("y2022", "y2021"), c("y2022", "y2020")),
+  function(pr) {
+    a <- flux_wide[[pr[1]]]; b <- flux_wide[[pr[2]]]
+    tt <- stats::t.test(a, b, paired = TRUE)
+    data.frame(
+      contrast          = paste(sub("^y", "", pr[1]), "vs", sub("^y", "", pr[2])),
+      n_enclosures      = length(a),
+      mean_log_diff     = unname(tt$estimate),
+      percent_change    = 100 * (exp(unname(tt$estimate)) - 1),
+      t                 = unname(tt$statistic),
+      p_value           = tt$p.value,
+      n_higher          = sum(a > b),
+      temp_diff_C       = mean(temp_wide[[pr[1]]]) - mean(temp_wide[[pr[2]]]))
+  })
+cat("\n=== Annual CH4 flux, unadjusted paired contrasts ===\n")
+print(flux_year_contrasts, row.names = FALSE, digits = 3)
+
+CH4_flux_annual$Year_display <- factor(as.character(CH4_flux_annual$Year),
+                                       levels = c("2020", "2021", "2022"))
+save_fig(
+  ggplot(CH4_flux_annual, aes(x = Year_display, y = CH4_flux)) +
+    geom_boxplot(outlier.shape = NA, fill = "grey92") +
+    geom_line(aes(group = Plot), colour = "grey60", linewidth = 0.4) +
+    geom_point(size = 5, pch = 21, fill = "grey40", colour = "black") +
+    scale_y_continuous(trans = "log10") +
+    labs(x = NULL, y = expression(paste("Annual C", H[4], " flux (", mu,
+                                        "mol ", m^-2, " ", y^-1, ")"))) +
+    theme_bw() +
+    theme(axis.text = element_text(size = 12), axis.title = element_text(size = 16)),
+  p_fig("Figure_S8C_methane_flux.pdf"), width = 5, height = 5)
+
+# --- Figure 6A: mcrA per MAG --------------------------------------------------
+# Full models, no term elimination. Zero-inflation term for MAGs with >20% zeros.
+
+df_sensitive.mcrA <- psmelt(methanogen_gene_ps) |>
+  mutate(WT_drawdown_cm = WT_drawdown * 100, Year = as.factor(Year), Plot = as.factor(Plot))
+
+df_sensitive.mcrA |>
+  group_by(SPRUCE_ID) |>
+  summarise(n = n(), n_zero = sum(Abundance == 0),
+            pct_zero = round(mean(Abundance == 0) * 100, 1), .groups = "drop") |>
+  print()
+
+mcrA_table <- purrr::map_dfr(unique(df_sensitive.mcrA$SPRUCE_ID), function(sid) {
+  d  <- filter(df_sensitive.mcrA, SPRUCE_ID == sid)
+  zi <- mean(d$Abundance == 0) >= 0.2
+  m  <- glmmTMB(Abundance ~ Temp_avg_top * WT_drawdown_cm + (1 | Plot),
+                ziformula = if (zi) ~ WT_drawdown_cm else ~0,
+                family = gaussian(link = "identity"), data = d)
+  out <- tidy_glmmtmb(m, sid) |> mutate(component = "conditional", model_type = if (zi) "ZIGA" else "Gaussian")
+  if (zi) {
+    z <- as.data.frame(summary(m)$coefficients$zi)
+    colnames(z) <- c("Estimate","Std_Error","z_value","p_value")
+    out <- bind_rows(out, data.frame(
+      response = sid, formula = paste(deparse(formula(m)), collapse = " "), n = nobs(m),
+      z, term = paste0("ZI:", rownames(z)), sig = "", R2_marginal = NA, R2_conditional = NA,
+      singular_fit = any(is.nan(z$Std_Error)), component = "zero-inflation",
+      model_type = "ZIGA", row.names = NULL))
+  }
+  out
+})
+
+# Flag coefficients whose standard error swamps the estimate.
+mcrA_table <- mcrA_table |>
+  mutate(unstable = is.na(Std_Error) |
+                    (!is.na(Estimate) & Std_Error > 100 * abs(Estimate)))
+if (any(mcrA_table$unstable))
+  warning("Unstable mcrA coefficients (SE >> estimate): ",
+          paste(unique(mcrA_table$response[mcrA_table$unstable]), collapse = ", "))
+print(mcrA_table)
+write_out(mcrA_table, p_sd("Suppl_Data_16_mcrA_models.csv"))
+
+df_sensitive.mcrA$taxonomy <- paste0(df_sensitive.mcrA$SPRUCE_ID, ": ", df_sensitive.mcrA$Phylum)
+save_fig(
+  ggplot(df_sensitive.mcrA, aes(x = WT_drawdown_cm, y = Abundance)) +
+    facet_wrap(~taxonomy, scales = "free_y", ncol = 2) +
+    geom_point(aes(fill = Warming_Treatment.ord, shape = Year), colour = "black", size = 5) +
+    scale_shape_manual(values = c(21, 22, 24)) + scale_fill_manual(values = allGroupsColors) +
+    xlab("Water table drawdown (cm)") +
+    ylab("Relative activity mcrA\n(TAD80/ribosomal expression)") +
+    theme_bw() +
+    theme(legend.position = "none", axis.text = element_text(size = 12),
+          axis.title = element_text(size = 16), strip.text = element_text(size = 12)),
+  p_fig("Figure_6A_mcrA_water_table.pdf"), height = 6, width = 7)
+
+# --- Figure 6B: methanogen phenol-active genes decreasing ---------------------
+# Four genomes. Effective n is 4, not the number of genes.
+
+ps_meth <- subset_genes(METHANOGEN_IDS)
+if (REFIT_MAASLIN) {
+  fit_maaslin(ps_meth, "RE_Methano_campergenes",
+              fixed = c("AvgTemp10cm", "WT_drawdown_cm"), random = "Plot")
+}
+df_Coef_Meth <- read_gene_maaslin(maaslin_path("RE_Methano_campergenes.rds"), ps_meth)
+stopifnot(all(c(TEMP_GENE, WT_GENE) %in% df_Coef_Meth$metadata))
+cat("Methanogen CAMPER genes: ", nrow(df_Coef_Meth), " tests, ",
+    sum(df_Coef_Meth$coef < 0), " negative coefficients, across ",
+    n_distinct(df_Coef_Meth$SPRUCE_ID), " genomes\n", sep = "")
+
+genes_df_meth <- add_taxonomy(count_gene_responses(df_Coef_Meth, "down", METHANOGEN_IDS),
+                              data.frame(tax_table(ps_meth)))
+pink <- scico(max(5, n_distinct(genes_df_meth$taxonomy)), palette = "acton")
+
+fig6b_A <- camper_scatter(filter(genes_df_meth, metadata == TEMP_GENE), "Temperature",
+                          pink, "decreasing")
+fig6b_B <- camper_scatter(filter(genes_df_meth, metadata == WT_GENE),   "Water table drawdown",
+                          pink, "decreasing", "right")
+save_legend(fig6b_B, legend_path(p_fig("Figure_6B_methanogen_phenolic_genes.pdf")),
+            width = 3.5, height = 5)
+save_fig(ggarrange(fig6b_A, fig6b_B + theme(legend.position = "none"),
+    ncol = 2, labels = c("A","B"), font.label = list(size = 18)),
+  p_fig("Figure_6B_methanogen_phenolic_genes.pdf"), width = 10, height = 4)
+
+write_out(filter(df_Coef_Meth, pval < 0.05) |> arrange(metadata, pval),
+          p_sd("Suppl_Data_17_methanogen_CAMPER_genes.csv"))
+```
+
+## 10. SUPPLEMENTARY DATA 1 AND 2 — MODEL COEFFICIENT TABLES
+
+Every `glmmTMB` fit registers itself in `MODEL_TABLE` with the formula it fitted.
+
+```{r stat-summary-tables}
+
+all_models <- bind_rows(MODEL_TABLE)
+
+env_responses <- c("Porewater CH4 (mM)", "Porewater CO2 (mM)", "Porewater CO2:CH4 ratio",
+                   "Gallic-acid-equivalent reducing capacity",
+                   "Porewater CH4 ~ total methanogen activity",
+                   "Annual CH4 flux ~ year x temperature (log scale)")
+write_out(filter(all_models, response %in% env_responses |
+                             grepl("^Sample NOSC", response)),
+          p_sd("Suppl_Data_01_environmental_models.csv"))
+write_out(filter(all_models, grepl("glucosidase|Cellobiohydrolase|acetylglucosaminidase|phosphatase|Phenol oxidase",
+                                   response)),
+          p_sd("Suppl_Data_02_enzyme_models.csv"))
+
+if (any(all_models$singular_fit, na.rm = TRUE))
+  warning("Singular fits present: ",
+          paste(unique(all_models$response[all_models$singular_fit]), collapse = ", "))
+```
+
+## 11. README AND OUTPUT MANIFEST
+
+```{r readme-and-manifest}
+
+expected <- c(
+  "Suppl_Data_01_environmental_models.csv",    "Suppl_Data_02_enzyme_models.csv",
+  "Suppl_Data_03_metabolites_WT.csv",          "Suppl_Data_04_metabolites_temp.csv",
+  "Suppl_Data_05_classlevel_competitive.csv",  "Suppl_Data_06_MAG_taxonomy_quality.csv",
+  "Suppl_Data_07_dbRDA_VIF.csv",               "Suppl_Data_08_MAG_responses.csv",
+  "Suppl_Data_09_cytochrome_c_temperature.csv","Suppl_Data_10_linked_metabolites.csv",
+  "Suppl_Data_11_hydrogenases_HydDB.csv",      "Suppl_Data_12_WSOX_CAMPER_genes.csv",
+  "Suppl_Data_13_WSAN_CAMPER_genes.csv",       "Suppl_Data_14_networked_genes.csv",
+  "Suppl_Data_15_methanogen_pathways.csv",     "Suppl_Data_16_mcrA_models.csv",
+  "Suppl_Data_17_methanogen_CAMPER_genes.csv", "Suppl_Data_18_annotation_citations.csv",
+  "Suppl_Data_03_04_column_definitions.csv")
+
+manifest <- data.frame(
+  file    = expected,
+  present = file.exists(p_sd(expected)),
+  rows    = vapply(p_sd(expected),
+                   \(f) if (file.exists(f)) nrow(readr::read_csv(f, show_col_types = FALSE))
+                        else NA_integer_, integer(1)))
+print(manifest, row.names = FALSE)
+
+if (any(!manifest$present))
+  warning("Missing supplementary data: ",
+          paste(manifest$file[!manifest$present], collapse = ", "))
+
+writeLines(paste0(
+"# SPRUCE Drought Manuscript Analysis Code
+
+Manuscript: Combined effects of warming and drought accelerate microbially
+mediated organic matter decomposition and suppress methanogenesis in peatlands
+Authors: Katherine Duchesneau et al.
+Journal: Nature Communications, NCOMMS-26-018889-T
+Code DOI (Zenodo): 10.5281/zenodo.19865237
+
+## How to run
+
+1. Open `Drought_R_analyses.Rproj`.
+2. Set `PROJ` at the top of `Drought_Manuscript_Analysis.Rmd` to your local
+   path. It is the only absolute path in the document.
+3. Knit `Drought_Manuscript_Analysis.Rmd`. It runs top to bottom and reads
+   nothing from outside `2Revisions_out/00_inputs/`.
+
+## Run switches, all at the top of the setup chunk
+
+REFIT_MAASLIN   refit every Maaslin2 model from the phyloseq objects
+REFIT_LARGE     also refit the two large gene models (hours to overnight)
+MAASLIN_CACHE   skip a refit when the stored fit matches the same inputs
+RUN_NETWORK     TRUE fits SpiecEasi, FALSE reloads 08_network/se_FULL.RDS
+RESAMPLE_N      replicate count behind the Figure 3 edge-recovery input
+RUN_RESAMPLE    TRUE recomputes edge recovery when the plotted edge set no
+                longer matches 00_inputs/Check_Fig3_edge_stability.csv;
+                FALSE stops the knit
+WIPE_OUTPUTS    delete 01_ to 08_ before the run; 00_inputs is never touched
+
+## Files
+
+Drought_Manuscript_Analysis.Rmd   all analyses, figures and tables
+Drought_R_analyses.Rproj          RStudio project
+
+## Folders
+
+2Revisions_out/   the whole analysis, inputs and outputs
+  00_inputs/      every file the Rmd reads
+  01_metadata/    merged metadata, NOSC, porewater gas, enzyme, CAMPER counts
+  02_phyloseq/    phyloseq objects this script creates
+  03_maaslin/     every Maaslin2 fit
+  04_suppl_data/  Supplementary Data 1-18
+  06_figures/     all main and supplementary figure PDFs, named as they are
+                  cited: Figure_1 to Figure_6, Figure_S1 to Figure_S9
+  08_network/     SpiecEasi fit, association matrix, linking tables, Figure 3
+
+## Supplementary Data
+
+01 environmental, porewater and annual CH4 flux mixed models
+02 enzyme activity mixed models
+03 metabolite feature responses to water table drawdown
+04 metabolite feature responses to temperature
+05 class-level competitive tests on the metabolite coefficients
+06 MAG taxonomy and genome quality
+07 VIF for all dbRDA models
+08 clustered MAG responses to temperature, water table and NOSC
+09 cytochrome c gene responses to temperature in WS-OX genomes
+10 metabolites linking warming-responsive MAGs to methanogens (Figure 3)
+11 hydrogenase gene responses in WS-AN genomes, HydDB annotated
+12 phenol-active gene responses in WS-OX genomes (Figure 4A)
+13 phenol-active gene responses in WS-AN genomes (Figure 4B)
+14 gene responses to temperature in methanogen-connected genomes (Figure 5)
+15 methanogen KEGG module presence (hand-curated, copied from 00_inputs)
+16 per-MAG mcrA models (Figure 6A)
+17 phenol-active gene responses in methanogens (Figure 6B)
+18 custom KEGG module definitions (hand-curated, copied from 00_inputs)
+
+## Figures
+
+Figure_1_dbRDA.pdf                        assembled four-panel Figure 1
+Figure_1A_MAG_activity.pdf                MAG activity dbRDA
+Figure_1B_metabolites.pdf                 metabolite composition dbRDA
+Figure_1C_16S.pdf                         16S community dbRDA
+Figure_1D_ITS.pdf                         ITS community dbRDA
+Figure_2A_genome_response_tree.pdf        MAG responses on the phylogeny
+Figure_2B_CO2_genome_scatter.pdf          porewater CO2 against genome group
+Figure_2C_phylogenetic_tree.pdf           294 MAGs, phenol-active gene counts
+Figure_3_network.pdf                      SpiecEasi metabolite-informed network
+Figure_4A_WSOX_phenolic_genes.pdf         phenol-active gene responses, WS-OX
+Figure_4B_WSAN_phenolic_genes.pdf         phenol-active gene responses, WS-AN
+Figure_5_KEGG_enrichment.pdf              KEGG pathway enrichment
+Figure_6A_mcrA_water_table.pdf            mcrA transcripts against drawdown
+Figure_6B_methanogen_phenolic_genes.pdf   phenol-active genes in methanogens
+Figure_S1_environmental_drivers.pdf       water table, moisture, temperature
+Figure_S2_porewater_gas.pdf               porewater CO2, CH4 and their ratio
+Figure_S3_enzyme_activity.pdf             phenol oxidase and hydrolase assays
+Figure_S4_MAG_abundance_dbRDA.pdf         MAG relative abundance dbRDA
+Figure_S5_cytochrome_c.pdf                cytochrome c genes in WS-OX genomes
+Figure_S6_central_metabolism_genes.pdf    K00382, K01915 and K00873
+Figure_S7_peptide_amino_acid_carbohydrate.pdf  class mean intensity by temperature
+Figure_S8_methanogen_activity.pdf         porewater CH4 against methanogen activity
+Figure_S8C_methane_flux.pdf               annual CH4 emission by year
+Figure_S9_variation_partitioning.pdf      varpart Venn diagrams
+
+"), file.path(PROJ, "README.md"))
+cat("README.md written.\n")
+
+cat("\n=== Files written this run ===\n")
+print(data.frame(file = FILE_LOG, exists = file.exists(FILE_LOG)), row.names = FALSE)
+sessionInfo()
+```
