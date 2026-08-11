@@ -8,8 +8,7 @@ Code DOI (Zenodo): 10.5281/zenodo.19865237
 
 ## How to run
 
-1. Open `Drought_R_analyses.Rproj`.
-2. Set `PROJ` at the top of `Drought_Manuscript_Analysis.Rmd` to your local
+1. Set `PROJ` at the top of `Drought_Manuscript_Analysis.Rmd` to your local
    path. It is the only absolute path in the document.
 3. Knit `Drought_Manuscript_Analysis.Rmd`. It runs top to bottom and reads
    nothing from outside `2Revisions_out/00_inputs/`.
